@@ -1,0 +1,15 @@
+# Go
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+vendor/
+
+# Config with secrets
+config.toml
+
+# local tools
+.claude/
