@@ -1,0 +1,76 @@
+version: 2
+
+project_name: rns-email-iface
+
+before:
+  hooks:
+    - go mod tidy
+    - go mod verify
+
+builds:
+  - id: rns-email-iface
+    main: ./cmd/rns-email-iface
+    binary: rns-email-iface
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: windows
+        goarch: arm64
+    ldflags:
+      - -s -w
+      - -X main.Version={{.Version}}
+      - -X main.Commit={{.Commit}}
+      - -X main.Date={{.Date}}
+    mod_timestamp: "{{.CommitTimestamp}}"
+
+archives:
+  - name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    formats:
+      - tar.gz
+    files:
+      - README.md
+      - LICENSE*
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+changelog:
+  sort: asc
+  use: git
+  filters:
+    exclude:
+      - "^test:"
+      - "^chore:"
+      - "^ci:"
+      - "^docs:"
+      - Merge pull request
+      - Merge branch
+  groups:
+    - title: Features
+      regexp: "^feat"
+      order: 0
+    - title: Bug Fixes
+      regexp: "^fix"
+      order: 1
+    - title: Other Changes
+      order: 999
+
+release:
+  github:
+    owner: x3ps
+    repo: rns-iface-email
+  draft: false
+  prerelease: auto
+  name_template: "{{.ProjectName}} {{.Tag}}"
