@@ -24,6 +24,7 @@
             pkgs.go
             pkgs.gopls
             pkgs.golangci-lint
+            pkgs.goreleaser
           ];
           shellHook = ''
             echo "rns-iface-email dev shell — go $(go version | awk '{print $3}')"
