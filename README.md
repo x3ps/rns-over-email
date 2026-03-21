@@ -23,7 +23,7 @@ Point-to-point email transport bridge for [Reticulum](https://reticulum.network/
 ## Architecture
 
 ```
-rnsd <-stdin/stdout-> rns-email-iface <-SMTP/IMAP-> mail server <-> remote peer
+rnsd <-stdin/stdout-> rns-over-email <-SMTP/IMAP-> mail server <-> remote peer
 ```
 
 The process communicates with rnsd via HDLC-framed stdin/stdout using [go-rns-pipe](https://github.com/x3ps/go-rns-pipe). Each process bridges a single remote peer.
@@ -50,7 +50,7 @@ Invalid values in environment variables cause immediate startup failure rather t
 ### go install
 
 ```sh
-go install github.com/x3ps/rns-iface-email/cmd/rns-email-iface@latest
+go install github.com/x3ps/rns-iface-email/cmd/rns-over-email@latest
 ```
 
 ### Build from source
@@ -58,7 +58,7 @@ go install github.com/x3ps/rns-iface-email/cmd/rns-email-iface@latest
 ```sh
 git clone https://github.com/x3ps/rns-iface-email.git
 cd rns-iface-email
-go build ./cmd/rns-email-iface
+go build ./cmd/rns-over-email
 ```
 
 ### Pre-built binaries
@@ -75,7 +75,7 @@ Add a `PipeInterface` block to your Reticulum config:
 [[interfaces]]
   type = PipeInterface
   name = EmailTransport
-  command = /path/to/rns-email-iface --smtp-host smtp.example.com --smtp-username user --smtp-password-file /run/secrets/pw --smtp-from user@example.com --imap-host imap.example.com --imap-username user --imap-password-file /run/secrets/pw --peer-email peer@example.com
+  command = /path/to/rns-over-email --smtp-host smtp.example.com --smtp-username user --smtp-password-file /run/secrets/pw --smtp-from user@example.com --imap-host imap.example.com --imap-username user --imap-password-file /run/secrets/pw --peer-email peer@example.com
   respawn_delay = 5
 ```
 
@@ -92,7 +92,7 @@ Precedence: defaults → env → flags → password-files.
 ### Quick start
 
 ```sh
-./rns-email-iface \
+./rns-over-email \
   --smtp-host smtp.example.com --smtp-port 587 \
   --smtp-username user@example.com --smtp-password-file /run/secrets/smtp-pw \
   --smtp-from user@example.com \
@@ -170,7 +170,7 @@ CLI `--smtp-password` and `--imap-password` flags are visible in `ps aux` and `/
 ## Build & Test
 
 ```sh
-go build ./cmd/rns-email-iface
+go build ./cmd/rns-over-email
 go test ./...
 ```
 

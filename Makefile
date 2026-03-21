@@ -1,5 +1,5 @@
-BIN := bin/rns-email-iface
-CMD := ./cmd/rns-email-iface
+BIN := bin/rns-over-email
+CMD := ./cmd/rns-over-email
 
 .PHONY: build test cover lint vet tidy clean run
 

@@ -121,7 +121,7 @@ func Defaults() Config {
 func Load(args []string) (*Config, error) {
 	cfg := Defaults()
 
-	fs := flag.NewFlagSet("rns-email-iface", flag.ContinueOnError)
+	fs := flag.NewFlagSet("rns-over-email", flag.ContinueOnError)
 
 	pipeName := fs.String("pipe-name", "", "pipe interface name")
 	pipeMTU := fs.Int("pipe-mtu", 0, "pipe MTU")

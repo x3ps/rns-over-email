@@ -39,4 +39,4 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - run: go build ./cmd/rns-email-iface
+      - run: go build ./cmd/rns-over-email

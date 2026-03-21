@@ -1,6 +1,6 @@
 version: 2
 
-project_name: rns-email-iface
+project_name: rns-over-email
 
 before:
   hooks:
@@ -8,9 +8,9 @@ before:
     - go mod verify
 
 builds:
-  - id: rns-email-iface
-    main: ./cmd/rns-email-iface
-    binary: rns-email-iface
+  - id: rns-over-email
+    main: ./cmd/rns-over-email
+    binary: rns-over-email
     env:
       - CGO_ENABLED=0
     goos:
