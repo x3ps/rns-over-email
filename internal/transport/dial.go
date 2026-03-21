@@ -27,14 +27,20 @@ func DialTCP(ctx context.Context, host string, port int, tlsMode string, dialTim
 			return nil, err
 		}
 		if deadline, ok := ctx.Deadline(); ok {
-			rawConn.SetDeadline(deadline)
+			if err := rawConn.SetDeadline(deadline); err != nil {
+				_ = rawConn.Close()
+				return nil, err
+			}
 		}
 		tlsConn := tls.Client(rawConn, &tls.Config{ServerName: host})
 		if err := tlsConn.HandshakeContext(ctx); err != nil {
-			rawConn.Close()
+			_ = rawConn.Close()
 			return nil, err
 		}
-		rawConn.SetDeadline(time.Time{})
+		if err := rawConn.SetDeadline(time.Time{}); err != nil {
+			_ = rawConn.Close()
+			return nil, err
+		}
 		return NewTimeoutConn(tlsConn, ioTimeout), nil
 	default: // "starttls" or "none"
 		rawConn, err := dialer.DialContext(ctx, "tcp", addr)

@@ -106,8 +106,8 @@ func startE2ESMTPServer(t *testing.T, backend *e2eBackend) (host string, port in
 	srv := smtp.NewServer(backend)
 	srv.Domain = "localhost"
 	srv.AllowInsecureAuth = true
-	go srv.Serve(ln)
-	t.Cleanup(func() { srv.Close() })
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() { _ = srv.Close() })
 
 	h, pStr, _ := net.SplitHostPort(ln.Addr().String())
 	p, err := strconv.Atoi(pStr)
@@ -426,10 +426,7 @@ func TestE2ECheckpointDurability(t *testing.T) {
 	go func() { done2 <- w2.Run(ctx2) }()
 
 	deadline2 := time.After(3 * time.Second)
-	for {
-		if dialCalled.Load() {
-			break
-		}
+	for !dialCalled.Load() {
 		select {
 		case <-deadline2:
 			cancel2()
@@ -477,7 +474,7 @@ func TestE2ECheckpointNotAdvancedOnInjectFailure(t *testing.T) {
 	// Run for a short window; inject always fails so checkpoint should stay at 0.
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
-	w.Run(ctx)
+	_ = w.Run(ctx)
 
 	cp, err := inboxRepo.GetCheckpoint(context.Background(), "INBOX", 1)
 	if err != nil {

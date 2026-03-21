@@ -69,7 +69,7 @@ func Dial(ctx context.Context, host string, port int, tlsMode string, onMailbox 
 		opts.TLSConfig = &tls.Config{ServerName: host}
 		c, err = imapclient.NewStartTLS(tc, opts)
 		if err != nil {
-			tc.Close()
+			_ = tc.Close()
 			return nil, fmt.Errorf("imap starttls: %w", err)
 		}
 	} else {

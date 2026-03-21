@@ -105,7 +105,7 @@ func (w *Worker) runSession(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("%w: %w", errDial, err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	if err := client.Login(w.cfg.Username, w.cfg.Password); err != nil {
 		return fmt.Errorf("login: %w", err)

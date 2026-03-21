@@ -47,7 +47,7 @@ func (s *SMTPSender) connect(ctx context.Context, label string) (*smtp.Client, e
 		var err error
 		c, err = smtp.NewClientStartTLS(tc, &tls.Config{ServerName: s.Host})
 		if err != nil {
-			tc.Close()
+			_ = tc.Close()
 			return nil, fmt.Errorf("%s starttls: %w", label, err)
 		}
 	} else {
@@ -55,13 +55,13 @@ func (s *SMTPSender) connect(ctx context.Context, label string) (*smtp.Client, e
 	}
 
 	if err := ctx.Err(); err != nil {
-		c.Close()
+		_ = c.Close()
 		return nil, err
 	}
 
 	auth := sasl.NewPlainClient("", s.Username, s.Password)
 	if err := c.Auth(auth); err != nil {
-		c.Close()
+		_ = c.Close()
 		return nil, fmt.Errorf("%s auth: %w", label, err)
 	}
 
@@ -73,7 +73,7 @@ func (s *SMTPSender) Send(ctx context.Context, to string, msg []byte) error {
 	if err != nil {
 		return err
 	}
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 
 	if err := ctx.Err(); err != nil {
 		return err
@@ -109,7 +109,7 @@ func (s *SMTPSender) Probe(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 
 	_ = c.Quit()
 	return nil

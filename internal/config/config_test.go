@@ -173,8 +173,12 @@ func TestPasswordFile(t *testing.T) {
 	dir := t.TempDir()
 	smtpPWFile := filepath.Join(dir, "smtp-pw")
 	imapPWFile := filepath.Join(dir, "imap-pw")
-	os.WriteFile(smtpPWFile, []byte("file-smtp-pw\n"), 0600)
-	os.WriteFile(imapPWFile, []byte("file-imap-pw\r\n"), 0600)
+	if err := os.WriteFile(smtpPWFile, []byte("file-smtp-pw\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(imapPWFile, []byte("file-imap-pw\r\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
 
 	args := []string{
 		"--smtp-host", "smtp.test.com",
@@ -206,8 +210,12 @@ func TestPasswordFileViaEnv(t *testing.T) {
 	dir := t.TempDir()
 	smtpPWFile := filepath.Join(dir, "smtp-pw")
 	imapPWFile := filepath.Join(dir, "imap-pw")
-	os.WriteFile(smtpPWFile, []byte("env-file-smtp-pw\n"), 0600)
-	os.WriteFile(imapPWFile, []byte("env-file-imap-pw\n"), 0600)
+	if err := os.WriteFile(smtpPWFile, []byte("env-file-smtp-pw\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(imapPWFile, []byte("env-file-imap-pw\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
 
 	t.Setenv("RNS_EMAIL_SMTP_PASSWORD_FILE", smtpPWFile)
 	t.Setenv("RNS_EMAIL_IMAP_PASSWORD_FILE", imapPWFile)
@@ -237,8 +245,12 @@ func TestPasswordFileFlagOverridesEnvFile(t *testing.T) {
 	dir := t.TempDir()
 	envFile := filepath.Join(dir, "env-pw")
 	flagFile := filepath.Join(dir, "flag-pw")
-	os.WriteFile(envFile, []byte("env-file-pw\n"), 0600)
-	os.WriteFile(flagFile, []byte("flag-file-pw\n"), 0600)
+	if err := os.WriteFile(envFile, []byte("env-file-pw\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(flagFile, []byte("flag-file-pw\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
 
 	t.Setenv("RNS_EMAIL_SMTP_PASSWORD_FILE", envFile)
 
@@ -255,7 +267,9 @@ func TestPasswordFileFlagOverridesEnvFile(t *testing.T) {
 func TestPasswordFileOverridesEnv(t *testing.T) {
 	dir := t.TempDir()
 	smtpPWFile := filepath.Join(dir, "smtp-pw")
-	os.WriteFile(smtpPWFile, []byte("file-pw\n"), 0600)
+	if err := os.WriteFile(smtpPWFile, []byte("file-pw\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
 
 	t.Setenv("RNS_EMAIL_SMTP_PASSWORD", "env-pw")
 
@@ -727,7 +741,9 @@ func TestPasswordFileOverridesDirectPassword_BothSources(t *testing.T) {
 	// File wins over env password AND direct flag password (three-way precedence).
 	dir := t.TempDir()
 	pwFile := filepath.Join(dir, "pw")
-	os.WriteFile(pwFile, []byte("file-pw\n"), 0600)
+	if err := os.WriteFile(pwFile, []byte("file-pw\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
 
 	t.Setenv("RNS_EMAIL_SMTP_PASSWORD", "env-pw")
 
@@ -754,7 +770,9 @@ func TestSMTPMaxRecoveryEqualToBase(t *testing.T) {
 func TestPasswordFileMultiLineUsesFirstLine(t *testing.T) {
 	dir := t.TempDir()
 	pwFile := filepath.Join(dir, "pw")
-	os.WriteFile(pwFile, []byte("first-line\nsecond-line\nthird-line\n"), 0600)
+	if err := os.WriteFile(pwFile, []byte("first-line\nsecond-line\nthird-line\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
 
 	args := append(validArgs(), "--smtp-password-file", pwFile)
 	cfg, err := Load(args)
@@ -769,7 +787,9 @@ func TestPasswordFileMultiLineUsesFirstLine(t *testing.T) {
 func TestPasswordFileWindowsLineEnding(t *testing.T) {
 	dir := t.TempDir()
 	pwFile := filepath.Join(dir, "pw")
-	os.WriteFile(pwFile, []byte("my-password\r\n"), 0600)
+	if err := os.WriteFile(pwFile, []byte("my-password\r\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
 
 	args := append(validArgs(), "--smtp-password-file", pwFile)
 	cfg, err := Load(args)
@@ -784,7 +804,9 @@ func TestPasswordFileWindowsLineEnding(t *testing.T) {
 func TestPasswordFileEmpty(t *testing.T) {
 	dir := t.TempDir()
 	pwFile := filepath.Join(dir, "empty-pw")
-	os.WriteFile(pwFile, []byte(""), 0600)
+	if err := os.WriteFile(pwFile, []byte(""), 0600); err != nil {
+		t.Fatal(err)
+	}
 
 	args := []string{
 		"--smtp-host", "smtp.test.com",

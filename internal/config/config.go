@@ -81,7 +81,7 @@ func (d *Duration) UnmarshalText(text []byte) error {
 }
 
 func (d Duration) MarshalText() ([]byte, error) {
-	return []byte(d.Duration.String()), nil
+	return []byte(d.String()), nil
 }
 
 // Defaults returns a Config populated with default values.

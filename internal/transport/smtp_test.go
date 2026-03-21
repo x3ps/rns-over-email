@@ -104,9 +104,9 @@ func startTestServer(t *testing.T, backend *testBackend) string {
 	srv.Domain = "localhost"
 	srv.AllowInsecureAuth = true
 
-	go srv.Serve(ln)
+	go func() { _ = srv.Serve(ln) }()
 	t.Cleanup(func() {
-		srv.Close()
+		_ = srv.Close()
 	})
 
 	return ln.Addr().String()
@@ -197,7 +197,7 @@ func TestSMTPQuitFailureDoesNotReturnError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { ln.Close() })
+	t.Cleanup(func() { _ = ln.Close() })
 
 	received := make(chan struct{}, 1)
 	go func() {
@@ -205,8 +205,8 @@ func TestSMTPQuitFailureDoesNotReturnError(t *testing.T) {
 		if err != nil {
 			return
 		}
-		defer conn.Close()
-		write := func(s string) { conn.Write([]byte(s + "\r\n")) }
+		defer func() { _ = conn.Close() }()
+		write := func(s string) { _, _ = conn.Write([]byte(s + "\r\n")) }
 		buf := make([]byte, 4096)
 		readline := func() string {
 			var line []byte
@@ -390,8 +390,8 @@ func startErrTestServer(t *testing.T, backend smtp.Backend) string {
 	srv := smtp.NewServer(backend)
 	srv.Domain = "localhost"
 	srv.AllowInsecureAuth = true
-	go srv.Serve(ln)
-	t.Cleanup(func() { srv.Close() })
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() { _ = srv.Close() })
 	return ln.Addr().String()
 }
 

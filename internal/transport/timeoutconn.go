@@ -23,14 +23,14 @@ func (c *TimeoutConn) SetTimeout(d time.Duration) {
 }
 
 func (c *TimeoutConn) Read(b []byte) (int, error) {
-	if err := c.Conn.SetDeadline(time.Now().Add(c.timeout)); err != nil {
+	if err := c.SetDeadline(time.Now().Add(c.timeout)); err != nil {
 		return 0, err
 	}
 	return c.Conn.Read(b)
 }
 
 func (c *TimeoutConn) Write(b []byte) (int, error) {
-	if err := c.Conn.SetDeadline(time.Now().Add(c.timeout)); err != nil {
+	if err := c.SetDeadline(time.Now().Add(c.timeout)); err != nil {
 		return 0, err
 	}
 	return c.Conn.Write(b)

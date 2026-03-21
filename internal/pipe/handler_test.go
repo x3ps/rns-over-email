@@ -139,7 +139,7 @@ func TestRecoveryModeTriggered(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	h.HandlePacket(ctx, []byte("fail-pkt"))
+	_ = h.HandlePacket(ctx, []byte("fail-pkt"))
 
 	// Wait for setOnline(false) to be called.
 	deadline := time.After(2 * time.Second)
@@ -206,14 +206,11 @@ func TestRecoveryProbeRetriesWithBackoff(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	h.HandlePacket(ctx, []byte("probe-retry-pkt"))
+	_ = h.HandlePacket(ctx, []byte("probe-retry-pkt"))
 
 	// Wait for a few probe attempts.
 	deadline := time.After(2 * time.Second)
-	for {
-		if sender.probeCnt.Load() >= 3 {
-			break
-		}
+	for sender.probeCnt.Load() < 3 {
 		select {
 		case <-deadline:
 			t.Fatalf("timed out: only %d probe calls", sender.probeCnt.Load())
@@ -268,8 +265,8 @@ func TestRecoveryNotDuplicated(t *testing.T) {
 	defer cancel()
 
 	// Two consecutive failures.
-	h.HandlePacket(ctx, []byte("dup-1"))
-	h.HandlePacket(ctx, []byte("dup-2"))
+	_ = h.HandlePacket(ctx, []byte("dup-1"))
+	_ = h.HandlePacket(ctx, []byte("dup-2"))
 
 	time.Sleep(100 * time.Millisecond)
 
@@ -288,7 +285,7 @@ func TestHandlePacketContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
-		h.HandlePacket(ctx, []byte("cancel-pkt"))
+		_ = h.HandlePacket(ctx, []byte("cancel-pkt"))
 		close(done)
 	}()
 
@@ -343,7 +340,7 @@ func TestRecoveryAfterSuccessResetsState(t *testing.T) {
 	defer cancel()
 
 	// First failure triggers recovery.
-	h.HandlePacket(ctx, []byte("pkt-1"))
+	_ = h.HandlePacket(ctx, []byte("pkt-1"))
 
 	// Wait for setOnline(false) #1.
 	deadline := time.After(2 * time.Second)
@@ -383,10 +380,7 @@ func TestRecoveryAfterSuccessResetsState(t *testing.T) {
 
 	// Wait for recovering flag to be cleared by defer.
 	deadline = time.After(2 * time.Second)
-	for {
-		if !h.recovering.Load() {
-			break
-		}
+	for h.recovering.Load() {
 		select {
 		case <-deadline:
 			t.Fatal("timed out waiting for recovering flag to reset")
@@ -400,7 +394,7 @@ func TestRecoveryAfterSuccessResetsState(t *testing.T) {
 	sender.probeMu.Unlock()
 
 	// Second failure should start a new recovery cycle.
-	h.HandlePacket(ctx, []byte("pkt-2"))
+	_ = h.HandlePacket(ctx, []byte("pkt-2"))
 
 	deadline = time.After(2 * time.Second)
 	for {
@@ -447,7 +441,7 @@ func TestConcurrentHandlePacket(t *testing.T) {
 	for i := 0; i < N; i++ {
 		go func() {
 			defer wg.Done()
-			h.HandlePacket(ctx, []byte("concurrent-pkt"))
+			_ = h.HandlePacket(ctx, []byte("concurrent-pkt"))
 		}()
 	}
 	wg.Wait()
@@ -474,17 +468,14 @@ func TestRecoveryBackoffCap(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	h.HandlePacket(ctx, []byte("backoff-cap-pkt"))
+	_ = h.HandlePacket(ctx, []byte("backoff-cap-pkt"))
 
 	// With cap at 40ms: probes arrive at ~20ms, ~60ms, ~100ms, ~140ms, ~180ms.
 	// Without cap (doubling): 20ms, 60ms, 140ms, 300ms, 620ms...
 	// Verify 5 probes happen well within 500ms (uncapped would take ~620ms).
 	start := time.Now()
 	deadline := time.After(500 * time.Millisecond)
-	for {
-		if sender.probeCnt.Load() >= 5 {
-			break
-		}
+	for sender.probeCnt.Load() < 5 {
 		select {
 		case <-deadline:
 			t.Fatalf("expected 5 probes within 500ms (cap should bound backoff), only got %d after %v",

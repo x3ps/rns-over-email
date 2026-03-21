@@ -8,13 +8,13 @@ import (
 
 func TestTimeoutConnReadSetsDeadline(t *testing.T) {
 	server, client := net.Pipe()
-	defer server.Close()
-	defer client.Close()
+	defer func() { _ = server.Close() }()
+	defer func() { _ = client.Close() }()
 
 	tc := NewTimeoutConn(client, 5*time.Second)
 
 	go func() {
-		server.Write([]byte("hello"))
+		_, _ = server.Write([]byte("hello"))
 	}()
 
 	buf := make([]byte, 5)
@@ -29,8 +29,8 @@ func TestTimeoutConnReadSetsDeadline(t *testing.T) {
 
 func TestTimeoutConnWriteSetsDeadline(t *testing.T) {
 	server, client := net.Pipe()
-	defer server.Close()
-	defer client.Close()
+	defer func() { _ = server.Close() }()
+	defer func() { _ = client.Close() }()
 
 	tc := NewTimeoutConn(client, 5*time.Second)
 
@@ -55,15 +55,15 @@ func TestTimeoutConnWriteSetsDeadline(t *testing.T) {
 
 func TestTimeoutConnSetTimeout(t *testing.T) {
 	server, client := net.Pipe()
-	defer server.Close()
-	defer client.Close()
+	defer func() { _ = server.Close() }()
+	defer func() { _ = client.Close() }()
 
 	// Start with a very short timeout, then extend it via SetTimeout.
 	tc := NewTimeoutConn(client, 1*time.Millisecond)
 	tc.SetTimeout(5 * time.Second)
 
 	go func() {
-		server.Write([]byte("x"))
+		_, _ = server.Write([]byte("x"))
 	}()
 
 	buf := make([]byte, 1)
@@ -74,8 +74,8 @@ func TestTimeoutConnSetTimeout(t *testing.T) {
 
 func TestTimeoutConnReadTimeout(t *testing.T) {
 	server, client := net.Pipe()
-	defer server.Close()
-	defer client.Close()
+	defer func() { _ = server.Close() }()
+	defer func() { _ = client.Close() }()
 
 	// 1ms timeout with no writer — Read must return a timeout error.
 	tc := NewTimeoutConn(client, 1*time.Millisecond)

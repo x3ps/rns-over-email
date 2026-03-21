@@ -472,7 +472,7 @@ func TestReconnectBackoff(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	w.Run(ctx)
+	_ = w.Run(ctx)
 	if dialCount < 2 {
 		t.Errorf("dialCount = %d, want >= 2 (need multiple attempts to verify backoff)", dialCount)
 	}
@@ -968,7 +968,7 @@ func TestRunSessionLoginFailure(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	w.Run(ctx)
+	_ = w.Run(ctx)
 
 	if dialCount < 2 {
 		t.Errorf("dialCount = %d, want >= 2 (login failure should cause reconnect)", dialCount)
@@ -1001,7 +1001,7 @@ func TestRunSessionSelectFailure(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	w.Run(ctx)
+	_ = w.Run(ctx)
 
 	if dialCount < 2 {
 		t.Errorf("dialCount = %d, want >= 2 (select failure should cause reconnect)", dialCount)
@@ -1174,10 +1174,7 @@ func TestIdleTimeoutRestart(t *testing.T) {
 
 	// Each nil idle return triggers a fetch; verify at least 2 occur.
 	deadline := time.After(3 * time.Second)
-	for {
-		if mock.fetchCalled.Load() >= 2 {
-			break
-		}
+	for mock.fetchCalled.Load() < 2 {
 		select {
 		case <-deadline:
 			t.Fatalf("timed out: fetchCalled=%d (idle timeout should trigger fetch)", mock.fetchCalled.Load())
