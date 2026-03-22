@@ -3,6 +3,7 @@ package imap
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"time"
@@ -18,6 +19,13 @@ const (
 	imapIOTimeout   = 60 * time.Second
 	imapIdleTimeout = 30 * time.Minute
 )
+
+// errNoUIDPlus is returned by DeleteUIDs when the server lacks the UIDPLUS
+// capability (RFC 4315). Without UIDPLUS, plain EXPUNGE removes ALL \Deleted
+// messages in the mailbox (RFC 3501 §6.4.3), not just ours. To avoid setting
+// \Deleted flags without a safe way to expunge them, the entire delete
+// operation is refused before any mailbox mutation occurs.
+var errNoUIDPlus = errors.New("delete cleanup requires UIDPLUS capability (RFC 4315)")
 
 // MailboxState holds info returned after selecting a mailbox.
 type MailboxState struct {
@@ -161,9 +169,7 @@ func (r *realClient) Idle(ctx context.Context) error {
 }
 
 func (r *realClient) HasIdle() bool {
-	caps := r.c.Caps()
-	_, ok := caps[goimap.CapIdle]
-	return ok
+	return hasIdle(r.c.Caps())
 }
 
 func (r *realClient) Noop() error {
@@ -182,10 +188,28 @@ func (r *realClient) MoveUIDs(uids []uint32, dest string) error {
 	return nil
 }
 
+// requireUIDPlus returns errNoUIDPlus if the server lacks UIDPLUS.
+// This is the pre-mutation gate used by DeleteUIDs.
+func requireUIDPlus(caps goimap.CapSet) error {
+	if !hasUIDPlus(caps) {
+		return errNoUIDPlus
+	}
+	return nil
+}
+
 func (r *realClient) DeleteUIDs(uids []uint32) error {
 	if len(uids) == 0 {
 		return nil
 	}
+
+	// Check UIDPLUS capability BEFORE any mailbox mutation. Without UIDPLUS,
+	// plain EXPUNGE removes ALL \Deleted messages (RFC 3501 §6.4.3), not just
+	// ours. Setting \Deleted without a safe expunge path would leave hidden
+	// flags that confuse other clients, so we refuse the entire operation.
+	if err := requireUIDPlus(r.c.Caps()); err != nil {
+		return err
+	}
+
 	uidSet := uidsToSet(uids)
 
 	// Store returns *FetchCommand; Close() drains pending FETCH responses (none
@@ -200,21 +224,9 @@ func (r *realClient) DeleteUIDs(uids []uint32) error {
 		return fmt.Errorf("store deleted flag: %w", err)
 	}
 
-	caps := r.c.Caps()
-	if _, ok := caps[goimap.CapUIDPlus]; ok {
-		// UID EXPUNGE (RFC 4315) removes only the specific UIDs we flagged.
-		if err := r.c.UIDExpunge(uidSet).Close(); err != nil {
-			return fmt.Errorf("uid expunge: %w", err)
-		}
-	} else {
-		// Without UIDPLUS the plain EXPUNGE removes *all* \Deleted messages in
-		// the mailbox, not just ours.  This is safe for exclusive access but can
-		// cause data loss under concurrent access (another client's \Deleted
-		// messages will also be expunged).  Prefer a server with UIDPLUS support
-		// when multiple clients share the same mailbox.
-		if err := r.c.Expunge().Close(); err != nil {
-			return fmt.Errorf("expunge: %w", err)
-		}
+	// UID EXPUNGE (RFC 4315) removes only the specific UIDs we flagged.
+	if err := r.c.UIDExpunge(uidSet).Close(); err != nil {
+		return fmt.Errorf("uid expunge: %w", err)
 	}
 	return nil
 }
@@ -230,6 +242,14 @@ func uidsToSet(uids []uint32) goimap.UIDSet {
 func (r *realClient) Close() error {
 	return r.c.Close()
 }
+
+// hasUIDPlus reports whether the server supports UIDPLUS (RFC 4315).
+// Uses CapSet.Has() which correctly handles IMAP4rev2 implied capabilities.
+func hasUIDPlus(caps goimap.CapSet) bool { return caps.Has(goimap.CapUIDPlus) }
+
+// hasIdle reports whether the server supports IDLE (RFC 2177).
+// Uses CapSet.Has() which correctly handles IMAP4rev2 implied capabilities.
+func hasIdle(caps goimap.CapSet) bool { return caps.Has(goimap.CapIdle) }
 
 // Ensure io.ReadWriteCloser constraint if needed.
 var _ io.Closer = (*realClient)(nil)
