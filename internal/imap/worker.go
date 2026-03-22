@@ -233,29 +233,37 @@ func (w *Worker) fetchAndProcess(ctx context.Context, client Client, lastUID uin
 	advanceable = append(advanceable, processedUIDs...)
 	advanceable = append(advanceable, skippedUIDs...)
 
-	safeUID := lastUID
+	computedSafe := lastUID
 	if len(advanceable) > 0 {
 		sort.Slice(advanceable, func(i, j int) bool {
 			return advanceable[i] < advanceable[j]
 		})
 		for _, uid := range advanceable {
-			if uid <= safeUID {
+			if uid <= computedSafe {
 				continue
 			}
 			if ceilingUID > 0 && uid > ceilingUID {
 				break
 			}
-			safeUID = uid
+			computedSafe = uid
 		}
-		if safeUID > lastUID {
-			if cpErr := w.repo.AdvanceCheckpoint(ctx, folder, uidValidity, safeUID); cpErr != nil {
-				w.logger.Warn("advance checkpoint failed", "error", cpErr)
-			}
+	}
+
+	// Persist checkpoint. checkpointOK gates cleanup and the returned UID:
+	// if persistence fails, we return lastUID (the old value) so the next
+	// cycle re-fetches and re-injects the same messages. Re-injection is
+	// safe because RNS deduplicates by packet hash.
+	checkpointOK := false
+	if computedSafe > lastUID {
+		if cpErr := w.repo.AdvanceCheckpoint(ctx, folder, uidValidity, computedSafe); cpErr != nil {
+			w.logger.Warn("advance checkpoint failed", "error", cpErr)
+		} else {
+			checkpointOK = true
 		}
 	}
 
 	// Detect stuck checkpoint: decode-failed UID with no progress.
-	if decodeFailedUID > 0 && safeUID == lastUID {
+	if decodeFailedUID > 0 && computedSafe == lastUID {
 		w.logger.Error("checkpoint stuck: message permanently undecodable — delete it manually",
 			"folder", folder, "stuck_uid", decodeFailedUID)
 	}
@@ -264,10 +272,11 @@ func (w *Worker) fetchAndProcess(ctx context.Context, client Client, lastUID uin
 	// below the safe checkpoint to avoid deleting messages above a gap that
 	// would be unrecoverable after a crash.
 	// Skipped UIDs are never cleaned up — they remain in the mailbox for the user.
-	if err == nil && safeUID > lastUID {
+	// Cleanup is gated on checkpointOK: never delete un-checkpointed messages.
+	if err == nil && checkpointOK {
 		var safeUIDs []uint32
 		for _, uid := range processedUIDs {
-			if uid <= safeUID {
+			if uid <= computedSafe {
 				safeUIDs = append(safeUIDs, uid)
 			}
 		}
@@ -276,7 +285,10 @@ func (w *Worker) fetchAndProcess(ctx context.Context, client Client, lastUID uin
 		}
 	}
 
-	return safeUID, err
+	if checkpointOK {
+		return computedSafe, err
+	}
+	return lastUID, err
 }
 
 // cleanup removes or moves already-processed messages on a best-effort basis.
@@ -298,7 +310,11 @@ func (w *Worker) cleanup(client Client, uids []uint32) {
 		}
 	case "move":
 		if err := client.MoveUIDs(uids, w.cfg.Cleanup.TargetFolder); err != nil {
-			w.logger.Warn("cleanup move failed", "uids", uids, "dest", w.cfg.Cleanup.TargetFolder, "error", err)
+			if errors.Is(err, errUnsafeMove) {
+				w.logger.Warn("move cleanup skipped: server lacks both MOVE and UIDPLUS; messages will remain in mailbox")
+			} else {
+				w.logger.Warn("cleanup move failed", "uids", uids, "dest", w.cfg.Cleanup.TargetFolder, "error", err)
+			}
 		}
 	}
 }

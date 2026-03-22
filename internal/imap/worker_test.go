@@ -31,6 +31,7 @@ type mockClient struct {
 	idleErr        error
 	hasIdle        bool
 	hasUIDPlusCap  bool
+	hasMoveCap     bool
 	noopErr        error
 	closeErr       error
 	moveErr        error
@@ -86,6 +87,9 @@ func (m *mockClient) Idle(ctx context.Context) error {
 func (m *mockClient) HasIdle() bool { return m.hasIdle }
 func (m *mockClient) Noop() error   { m.noopCalled.Add(1); return m.noopErr }
 func (m *mockClient) MoveUIDs(uids []uint32, dest string) error {
+	if !m.hasMoveCap && !m.hasUIDPlusCap {
+		return errUnsafeMove
+	}
 	m.mu.Lock()
 	m.movedUIDs = append(m.movedUIDs, uids...)
 	m.moveDest = dest
@@ -764,6 +768,7 @@ func TestCleanupMoveAfterProcess(t *testing.T) {
 	mock := &mockClient{
 		selectState: MailboxState{UIDValidity: 100},
 		fetchMsgs:   []fetchMsg{{uid: 3, raw: raw}},
+		hasMoveCap:  true,
 	}
 
 	w := &Worker{
@@ -2273,6 +2278,240 @@ func TestGarbageMessageWithMarkerPreserved(t *testing.T) {
 	}
 	if lastUID != 0 {
 		t.Errorf("lastUID = %d, want 0 (corrupt with marker should block checkpoint)", lastUID)
+	}
+}
+
+// failingRepo wraps a real repo but makes AdvanceCheckpoint return an error.
+type failingRepo struct {
+	inbox.Repository
+}
+
+func (f *failingRepo) AdvanceCheckpoint(context.Context, string, uint32, uint32) error {
+	return errors.New("checkpoint backend unavailable")
+}
+
+func TestCleanupSkippedOnCheckpointFailure(t *testing.T) {
+	realRepo := newTestRepo(t)
+	repo := &failingRepo{Repository: realRepo}
+
+	inject := func(_ context.Context, _ []byte) error { return nil }
+
+	raw := makeTestEnvelope(t, []byte("cp-fail-pkt"))
+	mock := &mockClient{
+		selectState:   MailboxState{UIDValidity: 100},
+		fetchMsgs:     []fetchMsg{{uid: 7, raw: raw}},
+		hasUIDPlusCap: true,
+	}
+
+	w := &Worker{
+		cfg: config.IMAPConfig{
+			Folder:  "INBOX",
+			Cleanup: config.CleanupConfig{Mode: "delete"},
+		},
+		peerEmail:  "from@test.com",
+		localEmail: "to@test.com",
+		repo:       repo,
+		inject:     inject,
+		logger:     testLogger(),
+	}
+
+	lastUID, err := w.fetchAndProcess(context.Background(), mock, 0, "INBOX", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Checkpoint failed → returned UID should be the old value (0), not computed (7).
+	if lastUID != 0 {
+		t.Errorf("lastUID = %d, want 0 (checkpoint failure should return old UID)", lastUID)
+	}
+	// No cleanup should have occurred.
+	if len(mock.deletedUIDs) != 0 {
+		t.Errorf("deletedUIDs = %v, want [] (cleanup must not run when checkpoint fails)", mock.deletedUIDs)
+	}
+}
+
+func TestCheckpointFailureReturnsOldUID(t *testing.T) {
+	realRepo := newTestRepo(t)
+	// Pre-set a checkpoint so the old value is non-zero.
+	if err := realRepo.AdvanceCheckpoint(context.Background(), "INBOX", 100, 5); err != nil {
+		t.Fatal(err)
+	}
+	repo := &failingRepo{Repository: realRepo}
+
+	inject := func(_ context.Context, _ []byte) error { return nil }
+
+	raw := makeTestEnvelope(t, []byte("cp-old-uid-pkt"))
+	mock := &mockClient{
+		selectState: MailboxState{UIDValidity: 100},
+		fetchMsgs:   []fetchMsg{{uid: 10, raw: raw}},
+	}
+
+	w := &Worker{
+		cfg:        config.IMAPConfig{Folder: "INBOX"},
+		peerEmail:  "from@test.com",
+		localEmail: "to@test.com",
+		repo:       repo,
+		inject:     inject,
+		logger:     testLogger(),
+	}
+
+	lastUID, err := w.fetchAndProcess(context.Background(), mock, 5, "INBOX", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lastUID != 5 {
+		t.Errorf("lastUID = %d, want 5 (should return old checkpoint on persistence failure)", lastUID)
+	}
+}
+
+func TestRepeatedFetchAfterCheckpointFailure(t *testing.T) {
+	// When checkpoint persistence fails, the next fetch re-injects the same
+	// messages. This is the accepted tradeoff: re-injection is safe because
+	// RNS deduplicates by packet hash.
+	realRepo := newTestRepo(t)
+	repo := &failingRepo{Repository: realRepo}
+
+	var injected [][]byte
+	inject := func(_ context.Context, pkt []byte) error {
+		injected = append(injected, pkt)
+		return nil
+	}
+
+	raw := makeTestEnvelope(t, []byte("dedup-pkt"))
+	mock := &mockClient{
+		selectState: MailboxState{UIDValidity: 100},
+		fetchMsgs:   []fetchMsg{{uid: 3, raw: raw}},
+	}
+
+	w := &Worker{
+		cfg:        config.IMAPConfig{Folder: "INBOX"},
+		peerEmail:  "from@test.com",
+		localEmail: "to@test.com",
+		repo:       repo,
+		inject:     inject,
+		logger:     testLogger(),
+	}
+
+	// First fetch: checkpoint fails, returns lastUID=0.
+	uid1, _ := w.fetchAndProcess(context.Background(), mock, 0, "INBOX", 100)
+	if uid1 != 0 {
+		t.Fatalf("first fetch: lastUID = %d, want 0", uid1)
+	}
+
+	// Second fetch with same lastUID: re-fetches and re-injects.
+	uid2, _ := w.fetchAndProcess(context.Background(), mock, uid1, "INBOX", 100)
+	if uid2 != 0 {
+		t.Fatalf("second fetch: lastUID = %d, want 0", uid2)
+	}
+
+	// Both fetches should have injected the packet.
+	if len(injected) != 2 {
+		t.Errorf("injected %d times, want 2 (re-injection on checkpoint failure is the accepted tradeoff)", len(injected))
+	}
+}
+
+func TestCleanupMoveSkippedWithoutCapabilities(t *testing.T) {
+	repo := newTestRepo(t)
+	inject := func(_ context.Context, _ []byte) error { return nil }
+
+	raw := makeTestEnvelope(t, []byte("no-move-cap"))
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	mock := &mockClient{
+		selectState: MailboxState{UIDValidity: 100},
+		fetchMsgs:   []fetchMsg{{uid: 5, raw: raw}},
+		// Neither hasMoveCap nor hasUIDPlusCap.
+	}
+
+	w := &Worker{
+		cfg: config.IMAPConfig{
+			Folder:  "INBOX",
+			Cleanup: config.CleanupConfig{Mode: "move", TargetFolder: "Archive"},
+		},
+		peerEmail:  "from@test.com",
+		localEmail: "to@test.com",
+		repo:       repo,
+		inject:     inject,
+		logger:     logger,
+	}
+
+	lastUID, err := w.fetchAndProcess(context.Background(), mock, 0, "INBOX", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lastUID != 5 {
+		t.Errorf("lastUID = %d, want 5 (checkpoint should still advance)", lastUID)
+	}
+	if len(mock.movedUIDs) != 0 {
+		t.Errorf("movedUIDs = %v, want [] (move skipped without capabilities)", mock.movedUIDs)
+	}
+	logOutput := logBuf.String()
+	if !strings.Contains(logOutput, "server lacks both MOVE and UIDPLUS") {
+		t.Errorf("expected unsafe move warning in log, got: %s", logOutput)
+	}
+}
+
+func TestCleanupMoveWithMoveCapOnly(t *testing.T) {
+	repo := newTestRepo(t)
+	inject := func(_ context.Context, _ []byte) error { return nil }
+
+	raw := makeTestEnvelope(t, []byte("move-cap-only"))
+	mock := &mockClient{
+		selectState: MailboxState{UIDValidity: 100},
+		fetchMsgs:   []fetchMsg{{uid: 3, raw: raw}},
+		hasMoveCap:  true,
+	}
+
+	w := &Worker{
+		cfg: config.IMAPConfig{
+			Folder:  "INBOX",
+			Cleanup: config.CleanupConfig{Mode: "move", TargetFolder: "Archive"},
+		},
+		peerEmail:  "from@test.com",
+		localEmail: "to@test.com",
+		repo:       repo,
+		inject:     inject,
+		logger:     testLogger(),
+	}
+
+	_, err := w.fetchAndProcess(context.Background(), mock, 0, "INBOX", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mock.movedUIDs) != 1 || mock.movedUIDs[0] != 3 {
+		t.Errorf("movedUIDs = %v, want [3]", mock.movedUIDs)
+	}
+}
+
+func TestCleanupMoveWithUIDPlusOnly(t *testing.T) {
+	repo := newTestRepo(t)
+	inject := func(_ context.Context, _ []byte) error { return nil }
+
+	raw := makeTestEnvelope(t, []byte("uidplus-only"))
+	mock := &mockClient{
+		selectState:   MailboxState{UIDValidity: 100},
+		fetchMsgs:     []fetchMsg{{uid: 3, raw: raw}},
+		hasUIDPlusCap: true,
+	}
+
+	w := &Worker{
+		cfg: config.IMAPConfig{
+			Folder:  "INBOX",
+			Cleanup: config.CleanupConfig{Mode: "move", TargetFolder: "Archive"},
+		},
+		peerEmail:  "from@test.com",
+		localEmail: "to@test.com",
+		repo:       repo,
+		inject:     inject,
+		logger:     testLogger(),
+	}
+
+	_, err := w.fetchAndProcess(context.Background(), mock, 0, "INBOX", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mock.movedUIDs) != 1 || mock.movedUIDs[0] != 3 {
+		t.Errorf("movedUIDs = %v, want [3] (UIDPLUS-only should allow safe fallback)", mock.movedUIDs)
 	}
 }
 
