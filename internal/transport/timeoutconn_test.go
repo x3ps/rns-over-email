@@ -2,6 +2,7 @@ package transport
 
 import (
 	"net"
+	"sync"
 	"testing"
 	"time"
 )
@@ -89,4 +90,95 @@ func TestTimeoutConnReadTimeout(t *testing.T) {
 	if !ok || !netErr.Timeout() {
 		t.Errorf("expected network timeout error, got %T: %v", err, err)
 	}
+}
+
+// TestTimeoutConnConcurrentSetTimeoutRead verifies no data race when
+// SetTimeout is called concurrently with Read (e.g. IMAP IDLE timeout change).
+// Run with -race to detect races.
+func TestTimeoutConnConcurrentSetTimeoutRead(t *testing.T) {
+	server, client := net.Pipe()
+	defer func() { _ = server.Close() }()
+	defer func() { _ = client.Close() }()
+
+	tc := NewTimeoutConn(client, 5*time.Second)
+
+	var wg sync.WaitGroup
+
+	// Writer goroutine: feed data so reads don't block.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 100; i++ {
+			if _, err := server.Write([]byte("x")); err != nil {
+				return
+			}
+		}
+	}()
+
+	// Reader goroutine.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		buf := make([]byte, 1)
+		for i := 0; i < 100; i++ {
+			_, _ = tc.Read(buf)
+		}
+	}()
+
+	// Concurrent SetTimeout calls.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 100; i++ {
+			tc.SetTimeout(time.Duration(i+1) * time.Second)
+		}
+	}()
+
+	wg.Wait()
+}
+
+// TestTimeoutConnConcurrentReadWrite verifies that concurrent Read and Write
+// use direction-specific deadlines and don't interfere with each other.
+// Run with -race to detect races.
+func TestTimeoutConnConcurrentReadWrite(t *testing.T) {
+	server, client := net.Pipe()
+	defer func() { _ = server.Close() }()
+	defer func() { _ = client.Close() }()
+
+	tc := NewTimeoutConn(client, 5*time.Second)
+
+	var wg sync.WaitGroup
+	const iterations = 50
+
+	// Server side: read what the client writes, and write data for the client to read.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		buf := make([]byte, 5)
+		for i := 0; i < iterations; i++ {
+			_, _ = server.Read(buf)
+			_, _ = server.Write([]byte("reply"))
+		}
+	}()
+
+	// Client reader.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		buf := make([]byte, 5)
+		for i := 0; i < iterations; i++ {
+			_, _ = tc.Read(buf)
+		}
+	}()
+
+	// Client writer.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			_, _ = tc.Write([]byte("hello"))
+		}
+	}()
+
+	wg.Wait()
 }

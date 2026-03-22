@@ -2,35 +2,40 @@ package transport
 
 import (
 	"net"
+	"sync/atomic"
 	"time"
 )
 
 // TimeoutConn wraps a net.Conn and sets a deadline before each Read/Write.
 type TimeoutConn struct {
 	net.Conn
-	timeout time.Duration
+	timeout atomic.Int64 // nanoseconds
 }
 
 // NewTimeoutConn creates a conn wrapper that sets per-operation deadlines.
 func NewTimeoutConn(c net.Conn, timeout time.Duration) *TimeoutConn {
-	return &TimeoutConn{Conn: c, timeout: timeout}
+	tc := &TimeoutConn{Conn: c}
+	tc.timeout.Store(int64(timeout))
+	return tc
 }
 
 // SetTimeout changes the per-operation deadline duration.
-// Safe to call between operations on single-threaded IMAP connections.
+// Safe to call concurrently with Read/Write (e.g. during IMAP IDLE).
 func (c *TimeoutConn) SetTimeout(d time.Duration) {
-	c.timeout = d
+	c.timeout.Store(int64(d))
 }
 
 func (c *TimeoutConn) Read(b []byte) (int, error) {
-	if err := c.SetDeadline(time.Now().Add(c.timeout)); err != nil {
+	d := time.Duration(c.timeout.Load())
+	if err := c.Conn.SetReadDeadline(time.Now().Add(d)); err != nil {
 		return 0, err
 	}
 	return c.Conn.Read(b)
 }
 
 func (c *TimeoutConn) Write(b []byte) (int, error) {
-	if err := c.SetDeadline(time.Now().Add(c.timeout)); err != nil {
+	d := time.Duration(c.timeout.Load())
+	if err := c.Conn.SetWriteDeadline(time.Now().Add(d)); err != nil {
 		return 0, err
 	}
 	return c.Conn.Write(b)
