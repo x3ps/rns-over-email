@@ -3,9 +3,11 @@ package envelope
 import (
 	"bytes"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
+	"mime/quotedprintable"
 	"net/mail"
 	"net/textproto"
 	"strings"
@@ -13,6 +15,18 @@ import (
 
 	"github.com/google/uuid"
 )
+
+// ErrNotTransport is returned by Decode when the message is not an RNS
+// transport envelope (e.g. a regular email). Callers can check with
+// errors.Is(err, ErrNotTransport) to distinguish "not ours" from "ours but
+// broken".
+var ErrNotTransport = errors.New("not an RNS transport message")
+
+// transportHeader is the header added to new-format outbound envelopes.
+const transportHeader = "X-RNS-Transport"
+
+// legacySubject is the Subject value used by the legacy envelope format.
+const legacySubject = "RNS Transport Packet"
 
 // Params holds the metadata needed to construct an email envelope.
 type Params struct {
@@ -34,15 +48,20 @@ func Encode(p Params) ([]byte, string, error) {
 	h := textproto.MIMEHeader{}
 	h.Set("From", p.From)
 	h.Set("To", p.To)
-	h.Set("Subject", "RNS Transport Packet")
+	h.Set("Subject", legacySubject)
 	h.Set("Date", time.Now().UTC().Format(time.RFC1123Z))
 	h.Set("Message-ID", mid)
 	h.Set("MIME-Version", "1.0")
 	h.Set("Content-Type", "application/octet-stream")
 	h.Set("Content-Transfer-Encoding", "base64")
+	h.Set(transportHeader, "1")
 
 	// Write headers using canonical format.
-	for _, key := range []string{"From", "To", "Subject", "Date", "Message-ID", "MIME-Version", "Content-Type", "Content-Transfer-Encoding"} {
+	for _, key := range []string{
+		"From", "To", "Subject", "Date", "Message-ID",
+		"MIME-Version", "Content-Type", "Content-Transfer-Encoding",
+		transportHeader,
+	} {
 		fmt.Fprintf(&buf, "%s: %s\r\n", key, h.Get(key))
 	}
 	buf.WriteString("\r\n")
@@ -80,34 +99,106 @@ const maxBodySize = 1 << 20
 // Decoded holds the parsed result of a MIME envelope.
 type Decoded struct {
 	MessageID string
+	From      string // bare email address (no display name)
+	To        string // bare email address (no display name)
 	Packet    []byte
 }
 
+// isTransport determines whether a parsed message is an RNS transport envelope.
+// Returns true if the message matches either the new format (X-RNS-Transport
+// header) or the legacy format (Subject + Content-Type match).
+func isTransport(header mail.Header, mediaType string) bool {
+	// New format: X-RNS-Transport: 1
+	if header.Get(transportHeader) == "1" && mediaType == "application/octet-stream" {
+		return true
+	}
+	// Legacy format: Subject + Content-Type
+	if header.Get("Subject") == legacySubject && mediaType == "application/octet-stream" {
+		return true
+	}
+	return false
+}
+
+// extractAddress parses an email address header and returns the bare address.
+// Returns an error if the header is missing or unparseable.
+func extractAddress(header mail.Header, key string) (string, error) {
+	raw := header.Get(key)
+	if raw == "" {
+		return "", fmt.Errorf("missing %s header", key)
+	}
+	addr, err := mail.ParseAddress(raw)
+	if err != nil {
+		return "", fmt.Errorf("parse %s address: %w", key, err)
+	}
+	return addr.Address, nil
+}
+
 // Decode parses a MIME email and extracts the RNS packet.
+//
+// Two-phase processing:
+//   - Phase A (headers only): classify transport vs non-transport, extract
+//     From/To. Returns ErrNotTransport early for non-transport messages
+//     (before reading body).
+//   - Phase B (body): read and decode body for confirmed transport messages.
 func Decode(raw []byte) (*Decoded, error) {
 	msg, err := mail.ReadMessage(bytes.NewReader(raw))
 	if err != nil {
-		return nil, fmt.Errorf("parse message: %w", err)
+		// H1: Parse failed. Raw-scan for transport marker to distinguish
+		// "not ours" (safe to skip) from "ours but corrupted" (preserve).
+		if hasTransportMarker(raw) {
+			return nil, fmt.Errorf("parse transport message: %w", err)
+		}
+		return nil, fmt.Errorf("%w: parse message: %v", ErrNotTransport, err)
 	}
 
-	d := &Decoded{
-		MessageID: msg.Header.Get("Message-ID"),
-	}
+	// Phase A: classify by headers.
+	// H2: Check transport header BEFORE Content-Type so that a transport
+	// message with a broken/missing Content-Type is "ours but broken"
+	// (regular error) rather than "not ours" (ErrNotTransport).
+	hasMarker := msg.Header.Get(transportHeader) == "1"
 
 	ct := msg.Header.Get("Content-Type")
 	if ct == "" {
-		return nil, fmt.Errorf("missing Content-Type header")
+		if hasMarker {
+			return nil, fmt.Errorf("transport envelope: missing Content-Type header")
+		}
+		return nil, fmt.Errorf("%w: missing Content-Type header", ErrNotTransport)
 	}
 
 	mediaType, _, err := mime.ParseMediaType(ct)
 	if err != nil {
-		return nil, fmt.Errorf("parse content-type: %w", err)
+		if hasMarker {
+			return nil, fmt.Errorf("transport envelope: parse content-type: %v", err)
+		}
+		return nil, fmt.Errorf("%w: parse content-type: %v", ErrNotTransport, err)
 	}
 
-	if mediaType != "application/octet-stream" {
-		return nil, fmt.Errorf("unsupported content-type: %s", mediaType)
+	if !isTransport(msg.Header, mediaType) {
+		if hasMarker {
+			return nil, fmt.Errorf("transport envelope: unexpected content-type=%s", mediaType)
+		}
+		return nil, fmt.Errorf("%w: content-type=%s", ErrNotTransport, mediaType)
 	}
 
+	// Message matches transport signals — extract From/To.
+	// If From/To headers are broken on a transport message, this is
+	// ours-but-broken (regular error), NOT ErrNotTransport.
+	from, err := extractAddress(msg.Header, "From")
+	if err != nil {
+		return nil, fmt.Errorf("transport envelope: %w", err)
+	}
+	to, err := extractAddress(msg.Header, "To")
+	if err != nil {
+		return nil, fmt.Errorf("transport envelope: %w", err)
+	}
+
+	d := &Decoded{
+		MessageID: msg.Header.Get("Message-ID"),
+		From:      from,
+		To:        to,
+	}
+
+	// Phase B: read and decode body.
 	body, err := io.ReadAll(io.LimitReader(msg.Body, maxBodySize+1))
 	if err != nil {
 		return nil, fmt.Errorf("read body: %w", err)
@@ -128,7 +219,8 @@ func Decode(raw []byte) (*Decoded, error) {
 }
 
 func decodeBody(body []byte, cte string) ([]byte, error) {
-	if strings.EqualFold(cte, "base64") {
+	switch strings.ToLower(strings.TrimSpace(cte)) {
+	case "base64":
 		cleaned := strings.Map(func(r rune) rune {
 			if r == '\r' || r == '\n' || r == ' ' {
 				return -1
@@ -140,6 +232,49 @@ func decodeBody(body []byte, cte string) ([]byte, error) {
 			return nil, fmt.Errorf("decode base64: %w", err)
 		}
 		return decoded, nil
+	case "quoted-printable":
+		decoded, err := io.ReadAll(quotedprintable.NewReader(bytes.NewReader(body)))
+		if err != nil {
+			return nil, fmt.Errorf("decode quoted-printable: %w", err)
+		}
+		return decoded, nil
+	case "7bit", "8bit", "binary", "":
+		return body, nil
+	default:
+		return nil, fmt.Errorf("unsupported Content-Transfer-Encoding: %q", cte)
 	}
-	return body, nil
+}
+
+// hasTransportMarker scans raw email bytes for transport signals
+// without requiring a full RFC 5322 parse. Used as a fallback
+// when mail.ReadMessage() fails on a corrupted message.
+// Detects both new format (X-RNS-Transport: 1) and legacy format
+// (Subject: RNS Transport Packet).
+func hasTransportMarker(raw []byte) bool {
+	headerEnd := bytes.Index(raw, []byte("\r\n\r\n"))
+	if headerEnd < 0 {
+		headerEnd = bytes.Index(raw, []byte("\n\n"))
+	}
+	if headerEnd < 0 {
+		headerEnd = len(raw)
+	}
+	for _, line := range bytes.Split(raw[:headerEnd], []byte("\n")) {
+		line = bytes.TrimRight(line, "\r")
+		if len(line) == 0 || line[0] == ' ' || line[0] == '\t' {
+			continue // skip folded continuation lines
+		}
+		parts := bytes.SplitN(line, []byte(":"), 2)
+		if len(parts) != 2 {
+			continue
+		}
+		name := bytes.TrimSpace(parts[0])
+		value := bytes.TrimSpace(parts[1])
+		if bytes.EqualFold(name, []byte("X-RNS-Transport")) && string(value) == "1" {
+			return true
+		}
+		if bytes.EqualFold(name, []byte("Subject")) && string(value) == legacySubject {
+			return true
+		}
+	}
+	return false
 }
