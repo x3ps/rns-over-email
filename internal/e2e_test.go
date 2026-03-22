@@ -235,7 +235,7 @@ func TestE2EInboundHappyPath(t *testing.T) {
 	w := imapworker.NewWorker(config.IMAPConfig{
 		Folder:       "INBOX",
 		PollInterval: config.Duration{Duration: time.Hour},
-	}, inboxRepo, inject, logger)
+	}, "sender@test.com", "receiver@test.com", inboxRepo, inject, logger)
 	w.SetDial(func(ctx context.Context, onMailbox func()) (imapworker.Client, error) {
 		return mock, nil
 	})
@@ -299,7 +299,7 @@ func TestE2EInboundInjectFailureRecovery(t *testing.T) {
 	w := imapworker.NewWorker(config.IMAPConfig{
 		Folder:       "INBOX",
 		PollInterval: config.Duration{Duration: time.Hour},
-	}, inboxRepo, inject, logger)
+	}, "sender@test.com", "receiver@test.com", inboxRepo, inject, logger)
 	w.SetDial(func(ctx context.Context, onMailbox func()) (imapworker.Client, error) {
 		return &e2eMockClient{
 			selectState: imapworker.MailboxState{UIDValidity: 1},
@@ -367,7 +367,7 @@ func TestE2ECheckpointDurability(t *testing.T) {
 	w := imapworker.NewWorker(config.IMAPConfig{
 		Folder:       "INBOX",
 		PollInterval: config.Duration{Duration: time.Hour},
-	}, inboxRepo, inject, logger)
+	}, "s@t.com", "r@t.com", inboxRepo, inject, logger)
 	w.SetDial(func(ctx context.Context, onMailbox func()) (imapworker.Client, error) {
 		sessionCount++
 		return &e2eMockClient{
@@ -412,7 +412,7 @@ func TestE2ECheckpointDurability(t *testing.T) {
 	w2 := imapworker.NewWorker(config.IMAPConfig{
 		Folder:       "INBOX",
 		PollInterval: config.Duration{Duration: time.Hour},
-	}, inboxRepo, inject, logger)
+	}, "s@t.com", "r@t.com", inboxRepo, inject, logger)
 	w2.SetDial(func(ctx context.Context, onMailbox func()) (imapworker.Client, error) {
 		dialCalled.Store(true)
 		return &e2eMockClient{
@@ -463,7 +463,7 @@ func TestE2ECheckpointNotAdvancedOnInjectFailure(t *testing.T) {
 	w := imapworker.NewWorker(config.IMAPConfig{
 		Folder:       "INBOX",
 		PollInterval: config.Duration{Duration: time.Hour},
-	}, inboxRepo, inject, logger)
+	}, "sender@test.com", "receiver@test.com", inboxRepo, inject, logger)
 	w.SetDial(func(ctx context.Context, onMailbox func()) (imapworker.Client, error) {
 		return &e2eMockClient{
 			selectState: imapworker.MailboxState{UIDValidity: 1},
@@ -531,7 +531,7 @@ func TestE2EBidirectionalFlow(t *testing.T) {
 	w := imapworker.NewWorker(config.IMAPConfig{
 		Folder:       "INBOX",
 		PollInterval: config.Duration{Duration: time.Hour},
-	}, inboxRepo, inject, logger)
+	}, "sender@test.com", "peer@test.com", inboxRepo, inject, logger)
 	w.SetDial(func(ctx context.Context, onMailbox func()) (imapworker.Client, error) {
 		return mock, nil
 	})

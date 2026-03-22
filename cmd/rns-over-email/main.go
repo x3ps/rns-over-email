@@ -15,6 +15,7 @@ import (
 	"github.com/x3ps/rns-iface-email/internal/config"
 	imapworker "github.com/x3ps/rns-iface-email/internal/imap"
 	"github.com/x3ps/rns-iface-email/internal/inbox"
+	"github.com/x3ps/rns-iface-email/internal/online"
 	"github.com/x3ps/rns-iface-email/internal/pipe"
 	"github.com/x3ps/rns-iface-email/internal/transport"
 )
@@ -72,9 +73,15 @@ func run(args []string) error {
 	iface.OnStatus(func(online bool) {
 		logger.Info("pipe status", "online", online)
 	})
+
+	// Online state aggregator: combines IMAP and SMTP health into a single
+	// signal. Must be created before iface.Start() so the initial
+	// callback(false) closes the startup window.
+	agg := online.NewAggregator(iface.SetOnline, logger)
+
 	pipeHandler := pipe.NewHandler(
 		sender, logger, cfg.Peer.Email, cfg.SMTP.From,
-		iface.SetOnline,
+		agg.SetSMTP,
 		time.Duration(cfg.SMTP.RecoveryDelay)*time.Second,
 		time.Duration(cfg.SMTP.MaxRecoveryDelay)*time.Second,
 	)
@@ -101,8 +108,8 @@ func run(args []string) error {
 			}
 		}
 	}
-	imapW := imapworker.NewWorker(cfg.IMAP, inboxRepo, inject, logger)
-	imapW.SetOnline(iface.SetOnline)
+	imapW := imapworker.NewWorker(cfg.IMAP, cfg.Peer.Email, cfg.SMTP.From, inboxRepo, inject, logger)
+	imapW.SetOnline(agg.SetIMAP)
 
 	errCh := make(chan error, 2)
 
