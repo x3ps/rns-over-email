@@ -101,9 +101,13 @@ func run(args []string) error {
 				return ctx.Err()
 			default:
 			}
-			if err := iface.Receive(pkt); err == nil {
+			err := iface.Receive(pkt)
+			if err == nil {
 				return nil
-			} else if !errors.Is(err, rnspipe.ErrOffline) {
+			}
+			// Retry on ErrOffline (pipe not yet online) and ErrNotStarted
+			// (IMAP worker started before iface.Start() completed).
+			if !errors.Is(err, rnspipe.ErrOffline) && !errors.Is(err, rnspipe.ErrNotStarted) {
 				return err
 			}
 			select {

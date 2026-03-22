@@ -58,8 +58,9 @@ func (w *Worker) SetDial(fn func(ctx context.Context, onMailbox func()) (Client,
 }
 
 // SetOnline registers a callback that is called with true when an IMAP session
-// is fully established (login + select + catch-up done) and with false when the
-// session ends for any reason. If not set, no online/offline signalling occurs.
+// is ready (login + select + checkpoint loaded) and with false when the session
+// ends for any reason. Online is signalled before catch-up fetch so that
+// inject() can deliver packets without spinning on ErrOffline.
 func (w *Worker) SetOnline(fn func(bool)) { w.setOnline = fn }
 
 func (w *Worker) callSetOnline(online bool) {
@@ -129,15 +130,19 @@ func (w *Worker) runSession(ctx context.Context) error {
 		return fmt.Errorf("get checkpoint: %w", err)
 	}
 
+	// Signal online before catch-up fetch. At this point the IMAP session is
+	// connected (login + select succeeded) and local state is prepared. The
+	// pipe must be online so that inject() → iface.Receive() doesn't spin on
+	// ErrOffline, which would deadlock: catch-up can't complete while the pipe
+	// is offline, and online was previously set only after catch-up.
+	w.callSetOnline(true)
+
 	// Catch-up fetch.
 	newLastUID, err := w.fetchAndProcess(ctx, client, lastUID, w.cfg.Folder, mbox.UIDValidity)
 	if err != nil {
 		return fmt.Errorf("catch-up fetch: %w", err)
 	}
 	lastUID = newLastUID
-
-	// Session is fully established — both directions are operational.
-	w.callSetOnline(true)
 
 	if client.HasIdle() {
 		return w.idleLoop(ctx, client, lastUID, w.cfg.Folder, mbox.UIDValidity, existsCh)

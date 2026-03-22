@@ -2546,3 +2546,149 @@ func TestCorruptedLegacyMessageBlocksCheckpoint(t *testing.T) {
 		t.Errorf("lastUID = %d, want 0 (corrupt legacy message should block checkpoint)", lastUID)
 	}
 }
+
+// TestOnlineBeforeCatchUp verifies that setOnline(true) is called before
+// fetchAndProcess, so inject() doesn't spin on ErrOffline during catch-up.
+func TestOnlineBeforeCatchUp(t *testing.T) {
+	repo := newTestRepo(t)
+
+	raw := makeTestEnvelope(t, []byte("pkt"))
+
+	var injectCalledWhileOnline atomic.Bool
+	var onlineAtInjectTime atomic.Bool
+
+	w := &Worker{
+		cfg: config.IMAPConfig{
+			Folder:            "INBOX",
+			PollInterval:      config.Duration{Duration: time.Hour},
+			ReconnectDelay:    1,
+			MaxReconnectDelay: 1,
+		},
+		peerEmail:  "from@test.com",
+		localEmail: "to@test.com",
+		repo:       repo,
+		inject: func(_ context.Context, _ []byte) error {
+			injectCalledWhileOnline.Store(true)
+			onlineAtInjectTime.Store(true)
+			return nil
+		},
+		logger: testLogger(),
+		setOnline: func(online bool) {
+			// If inject was already called and online is being set to true,
+			// that means online came after inject — the bug.
+			if injectCalledWhileOnline.Load() && online {
+				onlineAtInjectTime.Store(false)
+			}
+		},
+	}
+
+	mock := &mockClient{
+		selectState: MailboxState{UIDValidity: 100},
+		fetchMsgs:   []fetchMsg{{uid: 1, raw: raw}},
+		hasIdle:     false,
+		noopErr:     errors.New("end session"),
+	}
+
+	w.dial = func(_ context.Context, _ func()) (Client, error) {
+		injectCalledWhileOnline.Store(false)
+		return mock, nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- w.Run(ctx) }()
+
+	// Wait for session to run.
+	time.Sleep(500 * time.Millisecond)
+	cancel()
+	<-done
+
+	if !onlineAtInjectTime.Load() {
+		t.Error("inject was called before setOnline(true) — would deadlock in production")
+	}
+}
+
+// TestOnlineSetBeforeFetchAndProcess verifies the ordering: setOnline(true) is
+// called between GetCheckpoint and fetchAndProcess, not after.
+func TestOnlineSetBeforeFetchAndProcess(t *testing.T) {
+	repo := newTestRepo(t)
+
+	var events []string
+	var mu sync.Mutex
+	record := func(event string) {
+		mu.Lock()
+		events = append(events, event)
+		mu.Unlock()
+	}
+
+	w := &Worker{
+		cfg: config.IMAPConfig{
+			Folder:            "INBOX",
+			PollInterval:      config.Duration{Duration: time.Hour},
+			ReconnectDelay:    1,
+			MaxReconnectDelay: 1,
+		},
+		peerEmail:  "from@test.com",
+		localEmail: "to@test.com",
+		repo:       repo,
+		inject: func(_ context.Context, _ []byte) error {
+			record("inject")
+			return nil
+		},
+		logger: testLogger(),
+		setOnline: func(online bool) {
+			if online {
+				record("online-true")
+			} else {
+				record("online-false")
+			}
+		},
+	}
+
+	raw := makeTestEnvelope(t, []byte("data"))
+	mock := &mockClient{
+		selectState: MailboxState{UIDValidity: 100},
+		fetchMsgs:   []fetchMsg{{uid: 1, raw: raw}},
+		hasIdle:     false,
+		noopErr:     errors.New("end session"),
+	}
+	w.dial = func(_ context.Context, _ func()) (Client, error) {
+		return mock, nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- w.Run(ctx) }()
+
+	time.Sleep(500 * time.Millisecond)
+	cancel()
+	<-done
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	// Find first online-true and first inject — online-true must come first.
+	onlineIdx := -1
+	injectIdx := -1
+	for i, e := range events {
+		if e == "online-true" && onlineIdx == -1 {
+			onlineIdx = i
+		}
+		if e == "inject" && injectIdx == -1 {
+			injectIdx = i
+		}
+	}
+	if onlineIdx == -1 {
+		t.Fatal("setOnline(true) was never called")
+	}
+	if injectIdx == -1 {
+		t.Fatal("inject was never called")
+	}
+	if onlineIdx > injectIdx {
+		t.Errorf("setOnline(true) at index %d, inject at index %d — online must come before inject", onlineIdx, injectIdx)
+	}
+}
