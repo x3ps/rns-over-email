@@ -276,9 +276,8 @@ func sanitizePipeName(name string) string {
 	var b strings.Builder
 	b.Grow(len(name))
 	for _, r := range name {
-		switch {
-		case r == '/' || r == '\\' || r == ':' || r == '*' || r == '?' ||
-			r == '"' || r == '<' || r == '>' || r == '|' || r == '\x00':
+		switch r {
+		case '/', '\\', ':', '*', '?', '"', '<', '>', '|', '\x00':
 			b.WriteByte('-')
 		default:
 			b.WriteRune(r)
