@@ -32,8 +32,28 @@ The process communicates with rnsd via HDLC-framed stdin/stdout using [go-rns-pi
 
 This bridge operates as a **lightweight best-effort transport**:
 
-- **Outbound (RNS->email)**: Packets consumed from pipe stdin are encoded as MIME and sent via SMTP with 3 retries (1s/2s/4s exponential backoff). If all retries fail, the packet is **lost at this layer**. After 5 consecutive send failures, an error-level log is emitted to flag permanently broken SMTP configuration. Higher-layer RNS protocols (Link/Resource) may detect the loss via their own ACK/timeout mechanisms, but basic `Packet` sends are at-most-once.
+- **Outbound (RNS->email)**: Packets consumed from pipe stdin are encoded as MIME and sent via SMTP with 3 retries (1s/2s/4s exponential backoff). If all retries fail, the packet is **lost at this layer** and a recovery probe loop begins with configurable exponential backoff (`--smtp-recovery-delay` / `--smtp-max-recovery-delay`). During recovery, the interface is signalled offline; once a probe succeeds, it is signalled back online. Higher-layer RNS protocols (Link/Resource) may detect the loss via their own ACK/timeout mechanisms, but basic `Packet` sends are at-most-once.
 - **Inbound (email->RNS)**: An IMAP worker (IDLE with poll fallback) fetches emails, decodes packets, and injects them into rnsd via `iface.Receive()`. Checkpointed by UID. RNS deduplicates if the same packet arrives twice. Decode failures preserve messages for retry (no data loss).
+- **SMTP auth**: PLAIN is preferred when the server advertises it. If only LOGIN is available, LOGIN is used as a fallback. If neither is advertised, PLAIN is attempted as a compatibility last-resort.
+
+### Inbound processing
+
+Inbound messages are classified into three categories:
+
+1. **Not ours** (skipped): non-transport mail (wrong Content-Type, no transport markers) or transport mail from a non-peer sender / to a wrong recipient. Skipped messages do not block the checkpoint, are not deleted/moved by cleanup, and remain in the mailbox.
+2. **Ours but broken** (preserved): transport mail that matches transport signals but fails to decode (corrupt base64, unparseable From/To headers). Preserved for retry; blocks the checkpoint to prevent data loss.
+3. **Ours and valid** (processed): transport mail from the correct peer, to the correct local address, successfully decoded and injected into RNS.
+
+Transport envelope identification:
+
+- **New format**: `X-RNS-Transport: 1` header present AND `Content-Type: application/octet-stream`.
+- **Legacy format**: `Subject: RNS Transport Packet` AND `Content-Type: application/octet-stream` (no `X-RNS-Transport` header).
+
+From/To address validation applies to all transport formats (new and legacy). The `From` header must match `--peer-email` and the `To` header must match `--smtp-from` (both normalized to bare addresses).
+
+**Note**: Sender/recipient validation is protocol hardening (From/To header match), not cryptographic authentication — email headers can be spoofed by anyone with access to the mail server.
+
+**Duplicate injection**: When a corrupt transport message blocks the checkpoint, valid messages above it are still injected into RNS but not checkpointed. On session restart, they will be re-fetched and re-injected. This is safe because RNS deduplicates packets by hash.
 
 ### Config validation
 
@@ -116,7 +136,7 @@ Precedence: defaults → env → flags → password-files.
 | `--smtp-port` | `RNS_EMAIL_SMTP_PORT` | `587` | SMTP server port |
 | `--smtp-username` | `RNS_EMAIL_SMTP_USERNAME` | *(required)* | SMTP login |
 | `--smtp-password` | `RNS_EMAIL_SMTP_PASSWORD` | *(required)* | SMTP password (visible in `ps`; prefer file) |
-| `--smtp-password-file` | — | — | Path to file containing SMTP password (first line) |
+| `--smtp-password-file` | `RNS_EMAIL_SMTP_PASSWORD_FILE` | — | Path to file containing SMTP password (first line) |
 | `--smtp-from` | `RNS_EMAIL_SMTP_FROM` | *(required)* | Envelope From address |
 | `--smtp-tls` | `RNS_EMAIL_SMTP_TLS` | `starttls` | TLS mode: `tls`, `starttls`, `none` |
 | `--smtp-recovery-delay` | `RNS_EMAIL_SMTP_RECOVERY_DELAY` | `300` | Base backoff (seconds) before probing SMTP after send failure |
@@ -130,13 +150,13 @@ Precedence: defaults → env → flags → password-files.
 | `--imap-port` | `RNS_EMAIL_IMAP_PORT` | `993` | IMAP server port |
 | `--imap-username` | `RNS_EMAIL_IMAP_USERNAME` | *(required)* | IMAP login |
 | `--imap-password` | `RNS_EMAIL_IMAP_PASSWORD` | *(required)* | IMAP password (visible in `ps`; prefer file) |
-| `--imap-password-file` | — | — | Path to file containing IMAP password (first line) |
+| `--imap-password-file` | `RNS_EMAIL_IMAP_PASSWORD_FILE` | — | Path to file containing IMAP password (first line) |
 | `--imap-folder` | `RNS_EMAIL_IMAP_FOLDER` | `INBOX` | Mailbox folder to watch |
 | `--imap-tls` | `RNS_EMAIL_IMAP_TLS` | `tls` | TLS mode: `tls`, `starttls`, `none` |
 | `--imap-poll-interval` | `RNS_EMAIL_IMAP_POLL_INTERVAL` | `60s` | Poll interval when IDLE is unavailable (Go duration, e.g. `30s`) |
 | `--imap-reconnect-delay` | `RNS_EMAIL_IMAP_RECONNECT_DELAY` | `5` | Base reconnect backoff (seconds) after session failure |
 | `--imap-max-reconnect-delay` | `RNS_EMAIL_IMAP_MAX_RECONNECT_DELAY` | `300` | Max reconnect backoff (seconds); grows exponentially on dial errors |
-| `--imap-cleanup-mode` | `RNS_EMAIL_IMAP_CLEANUP_MODE` | `none` | Post-process cleanup: `none`, `delete`, `move` |
+| `--imap-cleanup-mode` | `RNS_EMAIL_IMAP_CLEANUP_MODE` | `none` | Post-process cleanup: `none`, `delete`, `move`. `delete` requires UIDPLUS (RFC 4315) or IMAP4rev2; without either, delete-cleanup is skipped with a warning log. `move` mode is unaffected. |
 | `--imap-cleanup-target-folder` | `RNS_EMAIL_IMAP_CLEANUP_TARGET_FOLDER` | — | Destination folder for `move` cleanup mode |
 
 ### Peer
