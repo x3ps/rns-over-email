@@ -32,7 +32,7 @@ The process communicates with rnsd via HDLC-framed stdin/stdout using [go-rns-pi
 
 This bridge operates as a **lightweight best-effort transport**:
 
-- **Outbound (RNS->email)**: Packets consumed from pipe stdin are encoded as MIME and sent via SMTP with 3 retries (1s/2s/4s exponential backoff). If all retries fail, the packet is **lost at this layer** and a recovery probe loop begins with configurable exponential backoff (`--smtp-recovery-delay` / `--smtp-max-recovery-delay`). During recovery, the interface is signalled offline; once a probe succeeds, it is signalled back online. Higher-layer RNS protocols (Link/Resource) may detect the loss via their own ACK/timeout mechanisms, but basic `Packet` sends are at-most-once.
+- **Outbound (RNS->email)**: Packets consumed from pipe stdin are encoded as MIME and sent via SMTP with 3 attempts (1s/2s exponential backoff). If all retries fail, the packet is **lost at this layer** and a recovery probe loop begins with configurable exponential backoff (`--smtp-recovery-delay` / `--smtp-max-recovery-delay`). During recovery, the interface is signalled offline; once a probe succeeds, it is signalled back online. Higher-layer RNS protocols (Link/Resource) may detect the loss via their own ACK/timeout mechanisms, but basic `Packet` sends are at-most-once.
 - **Inbound (email->RNS)**: An IMAP worker (IDLE with poll fallback) fetches emails, decodes packets, and injects them into rnsd via `iface.Receive()`. Checkpointed by UID. RNS deduplicates if the same packet arrives twice. Decode failures preserve messages for retry (no data loss).
 - **SMTP auth**: PLAIN is preferred when the server advertises it. If only LOGIN is available, LOGIN is used as a fallback. If neither is advertised, PLAIN is attempted as a compatibility last-resort.
 
@@ -156,7 +156,7 @@ Precedence: defaults → env → flags → password-files.
 | `--imap-poll-interval` | `RNS_EMAIL_IMAP_POLL_INTERVAL` | `60s` | Poll interval when IDLE is unavailable (Go duration, e.g. `30s`) |
 | `--imap-reconnect-delay` | `RNS_EMAIL_IMAP_RECONNECT_DELAY` | `5` | Base reconnect backoff (seconds) after session failure |
 | `--imap-max-reconnect-delay` | `RNS_EMAIL_IMAP_MAX_RECONNECT_DELAY` | `300` | Max reconnect backoff (seconds); grows exponentially on dial errors |
-| `--imap-cleanup-mode` | `RNS_EMAIL_IMAP_CLEANUP_MODE` | `none` | Post-process cleanup: `none`, `delete`, `move`. `delete` requires UIDPLUS (RFC 4315) or IMAP4rev2; without either, delete-cleanup is skipped with a warning log. `move` mode is unaffected. |
+| `--imap-cleanup-mode` | `RNS_EMAIL_IMAP_CLEANUP_MODE` | `none` | Post-process cleanup: `none`, `delete`, `move`. `delete` requires UIDPLUS (RFC 4315) or IMAP4rev2; without either, delete-cleanup is skipped with a warning log. `move` requires MOVE (RFC 6851) or UIDPLUS (RFC 4315); without either, move-cleanup is skipped with a warning log to prevent unsafe plain EXPUNGE. |
 | `--imap-cleanup-target-folder` | `RNS_EMAIL_IMAP_CLEANUP_TARGET_FOLDER` | — | Destination folder for `move` cleanup mode |
 
 ### Peer
