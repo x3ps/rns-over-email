@@ -61,6 +61,77 @@ func TestHasIdleEmptyCapSet(t *testing.T) {
 	}
 }
 
+func TestHasMove(t *testing.T) {
+	// Explicit MOVE capability.
+	caps := goimap.CapSet{}
+	caps[goimap.CapMove] = struct{}{}
+	if !hasMove(caps) {
+		t.Error("hasMove should return true when MOVE is explicitly present")
+	}
+
+	// IMAP4rev2 implies MOVE.
+	caps2 := goimap.CapSet{}
+	caps2[goimap.CapIMAP4rev2] = struct{}{}
+	if !hasMove(caps2) {
+		t.Error("hasMove should return true when IMAP4rev2 is present (implied capability)")
+	}
+
+	// Empty → false.
+	if hasMove(goimap.CapSet{}) {
+		t.Error("hasMove should return false for empty CapSet")
+	}
+}
+
+func TestRequireSafeMove(t *testing.T) {
+	tests := []struct {
+		name    string
+		caps    goimap.CapSet
+		wantErr bool
+	}{
+		{
+			name:    "MOVE only",
+			caps:    func() goimap.CapSet { c := goimap.CapSet{}; c[goimap.CapMove] = struct{}{}; return c }(),
+			wantErr: false,
+		},
+		{
+			name:    "UIDPLUS only",
+			caps:    func() goimap.CapSet { c := goimap.CapSet{}; c[goimap.CapUIDPlus] = struct{}{}; return c }(),
+			wantErr: false,
+		},
+		{
+			name: "both MOVE and UIDPLUS",
+			caps: func() goimap.CapSet {
+				c := goimap.CapSet{}
+				c[goimap.CapMove] = struct{}{}
+				c[goimap.CapUIDPlus] = struct{}{}
+				return c
+			}(),
+			wantErr: false,
+		},
+		{
+			name:    "neither",
+			caps:    goimap.CapSet{},
+			wantErr: true,
+		},
+		{
+			name:    "IMAP4rev2 implies both",
+			caps:    func() goimap.CapSet { c := goimap.CapSet{}; c[goimap.CapIMAP4rev2] = struct{}{}; return c }(),
+			wantErr: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := requireSafeMove(tt.caps)
+			if tt.wantErr && !errors.Is(err, errUnsafeMove) {
+				t.Errorf("expected errUnsafeMove, got: %v", err)
+			}
+			if !tt.wantErr && err != nil {
+				t.Errorf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
 func TestRequireUIDPlusGate(t *testing.T) {
 	// No capabilities → errNoUIDPlus
 	caps := goimap.CapSet{}

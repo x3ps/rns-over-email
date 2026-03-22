@@ -27,6 +27,12 @@ const (
 // operation is refused before any mailbox mutation occurs.
 var errNoUIDPlus = errors.New("delete cleanup requires UIDPLUS capability (RFC 4315)")
 
+// errUnsafeMove is returned by MoveUIDs when the server lacks both MOVE
+// (RFC 6851) and UIDPLUS (RFC 4315). Without MOVE, the client library falls
+// back to COPY+STORE+EXPUNGE. Without UIDPLUS, the plain EXPUNGE removes ALL
+// \Deleted messages in the mailbox, not just ours.
+var errUnsafeMove = errors.New("move cleanup unsafe: server lacks both MOVE (RFC 6851) and UIDPLUS (RFC 4315); plain EXPUNGE would remove all \\Deleted messages")
+
 // MailboxState holds info returned after selecting a mailbox.
 type MailboxState struct {
 	UIDValidity uint32
@@ -180,6 +186,9 @@ func (r *realClient) MoveUIDs(uids []uint32, dest string) error {
 	if len(uids) == 0 {
 		return nil
 	}
+	if err := requireSafeMove(r.c.Caps()); err != nil {
+		return err
+	}
 	uidSet := uidsToSet(uids)
 	_, err := r.c.Move(uidSet, dest).Wait()
 	if err != nil {
@@ -246,6 +255,21 @@ func (r *realClient) Close() error {
 // hasUIDPlus reports whether the server supports UIDPLUS (RFC 4315).
 // Uses CapSet.Has() which correctly handles IMAP4rev2 implied capabilities.
 func hasUIDPlus(caps goimap.CapSet) bool { return caps.Has(goimap.CapUIDPlus) }
+
+// hasMove reports whether the server supports MOVE (RFC 6851).
+// Uses CapSet.Has() which correctly handles IMAP4rev2 implied capabilities.
+func hasMove(caps goimap.CapSet) bool { return caps.Has(goimap.CapMove) }
+
+// requireSafeMove returns errUnsafeMove if the server lacks both MOVE and
+// UIDPLUS. With MOVE, the operation is atomic. With UIDPLUS (but no MOVE),
+// the fallback COPY+STORE+UID EXPUNGE is safe. Without either, plain EXPUNGE
+// would remove all \Deleted messages.
+func requireSafeMove(caps goimap.CapSet) error {
+	if !hasMove(caps) && !hasUIDPlus(caps) {
+		return errUnsafeMove
+	}
+	return nil
+}
 
 // hasIdle reports whether the server supports IDLE (RFC 2177).
 // Uses CapSet.Has() which correctly handles IMAP4rev2 implied capabilities.
