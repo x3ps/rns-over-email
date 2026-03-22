@@ -61,7 +61,7 @@ Invalid values in environment variables cause immediate startup failure rather t
 
 ### State
 
-- **checkpoint.json** — IMAP polling watermark (folder + uidvalidity -> last_uid). Atomic writes (temp+rename).
+- **checkpoint-{name}-{hash}.json** — IMAP polling watermark (folder + uidvalidity -> last_uid). Atomic writes (temp+rename). Path auto-derived from pipe name; override with `--checkpoint-path`.
 
 ---
 
@@ -99,7 +99,7 @@ Add a `PipeInterface` block to your Reticulum config:
   respawn_delay = 5
 ```
 
-Each interface block connects to exactly one peer. To bridge multiple peers, add one block per peer with a distinct `name` and `--peer-email`.
+Each interface block connects to exactly one peer. To bridge multiple peers, add one block per peer with a distinct `name` and `--peer-email`. The checkpoint file is automatically derived from the pipe name (e.g. `checkpoint-EmailTransport-<hash>.json`), so multiple instances sharing a working directory won't overwrite each other's state. If you need explicit control, use `--checkpoint-path`.
 
 ---
 
@@ -169,7 +169,7 @@ Precedence: defaults → env → flags → password-files.
 
 | Flag | Env | Default | Description |
 |------|-----|---------|-------------|
-| `--checkpoint-path` | `RNS_EMAIL_CHECKPOINT_PATH` | `./checkpoint.json` | Path to IMAP UID watermark file |
+| `--checkpoint-path` | `RNS_EMAIL_CHECKPOINT_PATH` | `./checkpoint-{name}-{hash}.json` | Path to IMAP UID watermark file (auto-derived from pipe name) |
 
 ### Logging
 

@@ -1,6 +1,8 @@
 package config
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -107,7 +109,7 @@ func Defaults() Config {
 			Cleanup:           CleanupConfig{Mode: "none"},
 		},
 		Checkpoint: CheckpointConfig{
-			Path: "./checkpoint.json",
+			Path: "", // derived from pipe name if not explicitly set
 		},
 		Logging: LoggingConfig{
 			Level:  "info",
@@ -255,6 +257,11 @@ func Load(args []string) (*Config, error) {
 		return nil, err
 	}
 
+	// Derive default checkpoint path from pipe name if not explicitly set.
+	if cfg.Checkpoint.Path == "" {
+		cfg.Checkpoint.Path = DeriveCheckpointPath(cfg.Pipe.Name)
+	}
+
 	Normalize(&cfg)
 
 	if err := Validate(&cfg); err != nil {
@@ -262,6 +269,35 @@ func Load(args []string) (*Config, error) {
 	}
 
 	return &cfg, nil
+}
+
+// sanitizePipeName replaces path-unsafe characters with hyphens.
+func sanitizePipeName(name string) string {
+	var b strings.Builder
+	b.Grow(len(name))
+	for _, r := range name {
+		switch {
+		case r == '/' || r == '\\' || r == ':' || r == '*' || r == '?' ||
+			r == '"' || r == '<' || r == '>' || r == '|' || r == '\x00':
+			b.WriteByte('-')
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// shortHash returns the first 8 hex chars of the SHA-256 of s.
+func shortHash(s string) string {
+	h := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(h[:4])
+}
+
+// DeriveCheckpointPath returns the default checkpoint file path for a given
+// pipe name. The path includes a sanitized name and a short hash to prevent
+// collisions when sanitization maps distinct names to the same string.
+func DeriveCheckpointPath(pipeName string) string {
+	return fmt.Sprintf("./checkpoint-%s-%s.json", sanitizePipeName(pipeName), shortHash(pipeName))
 }
 
 func applyEnv(cfg *Config) error {

@@ -36,6 +36,7 @@ func validConfig() Config {
 	cfg.IMAP.Username = "imapuser"
 	cfg.IMAP.Password = "imappass"
 	cfg.Peer.Email = "peer@test.com"
+	cfg.Checkpoint.Path = DeriveCheckpointPath(cfg.Pipe.Name)
 	return cfg
 }
 
@@ -63,8 +64,8 @@ func TestDefaults(t *testing.T) {
 	if cfg.IMAP.PollInterval.Duration != 60*time.Second {
 		t.Errorf("imap.poll_interval = %v, want 60s", cfg.IMAP.PollInterval)
 	}
-	if cfg.Checkpoint.Path != "./checkpoint.json" {
-		t.Errorf("checkpoint.path = %q, want ./checkpoint.json", cfg.Checkpoint.Path)
+	if cfg.Checkpoint.Path != "" {
+		t.Errorf("checkpoint.path = %q, want empty (sentinel)", cfg.Checkpoint.Path)
 	}
 	if cfg.Logging.Level != "info" {
 		t.Errorf("logging.level = %q, want info", cfg.Logging.Level)
@@ -824,5 +825,77 @@ func TestPasswordFileEmpty(t *testing.T) {
 	}
 	if err != nil && !strings.Contains(err.Error(), "smtp.password is required") {
 		t.Errorf("error = %q, want substring 'smtp.password is required'", err.Error())
+	}
+}
+
+func TestCheckpointPathDerivedFromPipeName(t *testing.T) {
+	cfg, err := Load(validArgs())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Default pipe name is "EmailTransport".
+	want := DeriveCheckpointPath("EmailTransport")
+	if cfg.Checkpoint.Path != want {
+		t.Errorf("checkpoint.path = %q, want %q", cfg.Checkpoint.Path, want)
+	}
+	if !strings.HasPrefix(cfg.Checkpoint.Path, "./checkpoint-EmailTransport-") {
+		t.Errorf("checkpoint.path = %q, expected prefix ./checkpoint-EmailTransport-", cfg.Checkpoint.Path)
+	}
+}
+
+func TestCheckpointPathExplicitOverride(t *testing.T) {
+	args := append(validArgs(), "--checkpoint-path", "/tmp/my-cp.json")
+	cfg, err := Load(args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Checkpoint.Path != "/tmp/my-cp.json" {
+		t.Errorf("checkpoint.path = %q, want /tmp/my-cp.json", cfg.Checkpoint.Path)
+	}
+}
+
+func TestCheckpointPathSanitization(t *testing.T) {
+	tests := []struct {
+		name     string
+		pipeName string
+	}{
+		{"slash", "foo/bar"},
+		{"backslash", "foo\\bar"},
+		{"colon", "foo:bar"},
+		{"mixed unsafe", "a/b:c\\d"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := DeriveCheckpointPath(tt.pipeName)
+			// Must not contain path-unsafe characters (aside from the ./ prefix).
+			after := strings.TrimPrefix(path, "./")
+			for _, c := range []string{"/", "\\", ":"} {
+				if strings.Contains(after, c) {
+					t.Errorf("DeriveCheckpointPath(%q) = %q contains %q", tt.pipeName, path, c)
+				}
+			}
+		})
+	}
+}
+
+func TestCheckpointPathDistinctForDistinctNames(t *testing.T) {
+	// Names that sanitize to the same string but differ in the original.
+	p1 := DeriveCheckpointPath("foo/bar")
+	p2 := DeriveCheckpointPath("foo:bar")
+	if p1 == p2 {
+		t.Errorf("distinct pipe names produced same path: %q", p1)
+	}
+}
+
+func TestCheckpointPathCustomPipeName(t *testing.T) {
+	args := append(validArgs(), "--pipe-name", "MyCustomPipe")
+	cfg, err := Load(args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := DeriveCheckpointPath("MyCustomPipe")
+	if cfg.Checkpoint.Path != want {
+		t.Errorf("checkpoint.path = %q, want %q", cfg.Checkpoint.Path, want)
 	}
 }
