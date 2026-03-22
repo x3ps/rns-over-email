@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/mail"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/x3ps/rns-iface-email/internal/config"
@@ -22,21 +24,27 @@ var errDial = errors.New("dial failed")
 
 // Worker polls or idles on an IMAP mailbox and injects inbound packets.
 type Worker struct {
-	cfg       config.IMAPConfig
-	repo      inbox.Repository
-	inject    func(context.Context, []byte) error
-	dial      func(ctx context.Context, onMailbox func()) (Client, error)
-	logger    *slog.Logger
-	setOnline func(bool)
+	cfg        config.IMAPConfig
+	peerEmail  string // normalized bare address of the remote peer
+	localEmail string // normalized bare address of the local endpoint
+	repo       inbox.Repository
+	inject     func(context.Context, []byte) error
+	dial       func(ctx context.Context, onMailbox func()) (Client, error)
+	logger     *slog.Logger
+	setOnline  func(bool)
 }
 
 // NewWorker creates an IMAP worker. The inject function should call iface.Receive.
-func NewWorker(cfg config.IMAPConfig, repo inbox.Repository, inject func(context.Context, []byte) error, logger *slog.Logger) *Worker {
+// peerEmail and localEmail are bare email addresses used to validate inbound
+// transport envelopes (point-to-point contract).
+func NewWorker(cfg config.IMAPConfig, peerEmail, localEmail string, repo inbox.Repository, inject func(context.Context, []byte) error, logger *slog.Logger) *Worker {
 	w := &Worker{
-		cfg:    cfg,
-		repo:   repo,
-		inject: inject,
-		logger: logger.With("component", "imap-worker"),
+		cfg:        cfg,
+		peerEmail:  peerEmail,
+		localEmail: localEmail,
+		repo:       repo,
+		inject:     inject,
+		logger:     logger.With("component", "imap-worker"),
 	}
 	w.dial = func(ctx context.Context, onMailbox func()) (Client, error) {
 		return Dial(ctx, cfg.Host, cfg.Port, cfg.TLS, onMailbox)
@@ -137,8 +145,24 @@ func (w *Worker) runSession(ctx context.Context) error {
 	return w.pollLoop(ctx, client, lastUID, w.cfg.Folder, mbox.UIDValidity)
 }
 
+// canonicalAddr returns a comparison-ready email address:
+// display name stripped, domain lowercased, local-part unchanged.
+// Per RFC 5321 §2.3.5 domain names are case-insensitive.
+func canonicalAddr(addr string) string {
+	bare := addr
+	if parsed, err := mail.ParseAddress(addr); err == nil {
+		bare = parsed.Address
+	}
+	at := strings.LastIndex(bare, "@")
+	if at < 0 {
+		return bare
+	}
+	return bare[:at+1] + strings.ToLower(bare[at+1:])
+}
+
 func (w *Worker) fetchAndProcess(ctx context.Context, client Client, lastUID uint32, folder string, uidValidity uint32) (uint32, error) {
 	var processedUIDs []uint32
+	var skippedUIDs []uint32
 	var failedUID uint32
 	var decodeFailedUID uint32
 
@@ -148,11 +172,31 @@ func (w *Worker) fetchAndProcess(ctx context.Context, client Client, lastUID uin
 		}
 
 		decoded, decErr := envelope.Decode(raw)
+		if errors.Is(decErr, envelope.ErrNotTransport) {
+			w.logger.Debug("skipping non-transport message", "uid", uid)
+			skippedUIDs = append(skippedUIDs, uid)
+			return nil
+		}
 		if decErr != nil {
 			w.logger.Warn("decode failed, preserving for retry", "uid", uid, "error", decErr)
 			if decodeFailedUID == 0 || uid < decodeFailedUID {
 				decodeFailedUID = uid
 			}
+			return nil
+		}
+
+		// Point-to-point contract: verify sender and recipient.
+		// Use canonicalAddr for comparison (domain-case-insensitive per RFC 5321).
+		if w.peerEmail != "" && canonicalAddr(decoded.From) != canonicalAddr(w.peerEmail) {
+			w.logger.Debug("skipping message from non-peer sender",
+				"uid", uid, "from", decoded.From, "expected", w.peerEmail)
+			skippedUIDs = append(skippedUIDs, uid)
+			return nil
+		}
+		if w.localEmail != "" && canonicalAddr(decoded.To) != canonicalAddr(w.localEmail) {
+			w.logger.Debug("skipping message to wrong recipient",
+				"uid", uid, "to", decoded.To, "expected", w.localEmail)
+			skippedUIDs = append(skippedUIDs, uid)
 			return nil
 		}
 
@@ -182,12 +226,19 @@ func (w *Worker) fetchAndProcess(ctx context.Context, client Client, lastUID uin
 		ceilingUID = decodeFailedUID
 	}
 
+	// Merge processed and skipped UIDs into a single sorted list of
+	// "advanceable" UIDs. Skipped (non-transport / wrong sender) UIDs
+	// are safe to advance past — they will never become processable.
+	advanceable := make([]uint32, 0, len(processedUIDs)+len(skippedUIDs))
+	advanceable = append(advanceable, processedUIDs...)
+	advanceable = append(advanceable, skippedUIDs...)
+
 	safeUID := lastUID
-	if len(processedUIDs) > 0 {
-		sort.Slice(processedUIDs, func(i, j int) bool {
-			return processedUIDs[i] < processedUIDs[j]
+	if len(advanceable) > 0 {
+		sort.Slice(advanceable, func(i, j int) bool {
+			return advanceable[i] < advanceable[j]
 		})
-		for _, uid := range processedUIDs {
+		for _, uid := range advanceable {
 			if uid <= safeUID {
 				continue
 			}
@@ -209,9 +260,20 @@ func (w *Worker) fetchAndProcess(ctx context.Context, client Client, lastUID uin
 			"folder", folder, "stuck_uid", decodeFailedUID)
 	}
 
-	// Best-effort cleanup of processed messages.
-	if err == nil && len(processedUIDs) > 0 {
-		w.cleanup(client, processedUIDs)
+	// Best-effort cleanup of processed messages. Only clean up UIDs at or
+	// below the safe checkpoint to avoid deleting messages above a gap that
+	// would be unrecoverable after a crash.
+	// Skipped UIDs are never cleaned up — they remain in the mailbox for the user.
+	if err == nil && safeUID > lastUID {
+		var safeUIDs []uint32
+		for _, uid := range processedUIDs {
+			if uid <= safeUID {
+				safeUIDs = append(safeUIDs, uid)
+			}
+		}
+		if len(safeUIDs) > 0 {
+			w.cleanup(client, safeUIDs)
+		}
 	}
 
 	return safeUID, err
@@ -228,7 +290,11 @@ func (w *Worker) cleanup(client Client, uids []uint32) {
 	switch w.cfg.Cleanup.Mode {
 	case "delete":
 		if err := client.DeleteUIDs(uids); err != nil {
-			w.logger.Warn("cleanup delete failed", "uids", uids, "error", err)
+			if errors.Is(err, errNoUIDPlus) {
+				w.logger.Warn("delete cleanup skipped: server lacks UIDPLUS; messages will remain in mailbox")
+			} else {
+				w.logger.Warn("cleanup delete failed", "uids", uids, "error", err)
+			}
 		}
 	case "move":
 		if err := client.MoveUIDs(uids, w.cfg.Cleanup.TargetFolder); err != nil {
