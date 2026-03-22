@@ -5,6 +5,7 @@ Point-to-point email transport bridge for [Reticulum](https://reticulum.network/
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Go 1.26+](https://img.shields.io/badge/go-1.26%2B-00ADD8.svg)
 ![Platforms: linux/darwin/windows · amd64/arm64](https://img.shields.io/badge/platforms-linux%20%7C%20darwin%20%7C%20windows-lightgrey.svg)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/x3ps/rns-over-email)
 
 ---
 
@@ -61,7 +62,7 @@ Invalid values in environment variables cause immediate startup failure rather t
 
 ### State
 
-- **checkpoint-{name}-{hash}.json** — IMAP polling watermark (folder + uidvalidity -> last_uid). Atomic writes (temp+rename). Path auto-derived from pipe name; override with `--checkpoint-path`.
+- **checkpoint.json** — IMAP polling watermark (folder + uidvalidity -> last_uid). Atomic writes (temp+rename).
 
 ---
 
