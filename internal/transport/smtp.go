@@ -59,7 +59,18 @@ func (s *SMTPSender) connect(ctx context.Context, label string) (*smtp.Client, e
 		return nil, err
 	}
 
-	auth := sasl.NewPlainClient("", s.Username, s.Password)
+	var auth sasl.Client
+	switch {
+	case c.SupportsAuth("PLAIN"):
+		auth = sasl.NewPlainClient("", s.Username, s.Password)
+	case c.SupportsAuth("LOGIN"):
+		auth = sasl.NewLoginClient(s.Username, s.Password)
+	default:
+		if s.Logger != nil {
+			s.Logger.Warn("server advertises no known auth mechanisms, attempting PLAIN as compatibility fallback")
+		}
+		auth = sasl.NewPlainClient("", s.Username, s.Password)
+	}
 	if err := c.Auth(auth); err != nil {
 		_ = c.Close()
 		return nil, fmt.Errorf("%s auth: %w", label, err)

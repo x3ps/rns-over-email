@@ -443,3 +443,164 @@ func TestSMTPSendErrors(t *testing.T) {
 		})
 	}
 }
+
+// loginServer implements sasl.Server for the LOGIN mechanism.
+// go-sasl doesn't provide a server-side LOGIN implementation.
+// The LOGIN client sends username as the initial response in Start(),
+// then expects "Password:" as a server challenge.
+type loginServer struct {
+	authenticate func(username, password string) error
+	step         int
+	username     string
+}
+
+func (s *loginServer) Next(response []byte) (challenge []byte, done bool, err error) {
+	switch s.step {
+	case 0:
+		// Client sent username as initial response.
+		s.username = string(response)
+		s.step++
+		return []byte("Password:"), false, nil
+	case 1:
+		// Client sent password.
+		s.step++
+		return nil, true, s.authenticate(s.username, string(response))
+	default:
+		return nil, true, fmt.Errorf("unexpected LOGIN step")
+	}
+}
+
+// authRecordingBackend records which AUTH mechanism was used by the client.
+type authRecordingBackend struct {
+	mu         sync.Mutex
+	mechanisms []string // advertised mechanisms
+	usedMech   string   // mechanism actually used by client
+}
+
+func (b *authRecordingBackend) NewSession(c *smtp.Conn) (smtp.Session, error) {
+	return &authRecordingSession{backend: b, mechs: b.mechanisms}, nil
+}
+
+type authRecordingSession struct {
+	backend *authRecordingBackend
+	mechs   []string
+}
+
+func (s *authRecordingSession) AuthMechanisms() []string { return s.mechs }
+func (s *authRecordingSession) Auth(mech string) (sasl.Server, error) {
+	s.backend.mu.Lock()
+	s.backend.usedMech = mech
+	s.backend.mu.Unlock()
+
+	switch mech {
+	case "PLAIN":
+		return sasl.NewPlainServer(func(_, username, password string) error {
+			if username != "testuser" || password != "testpass" {
+				return fmt.Errorf("invalid credentials")
+			}
+			return nil
+		}), nil
+	case "LOGIN":
+		return &loginServer{
+			authenticate: func(username, password string) error {
+				if username != "testuser" || password != "testpass" {
+					return fmt.Errorf("invalid credentials")
+				}
+				return nil
+			},
+		}, nil
+	default:
+		return nil, fmt.Errorf("unsupported mechanism: %s", mech)
+	}
+}
+func (s *authRecordingSession) Mail(_ string, _ *smtp.MailOptions) error { return nil }
+func (s *authRecordingSession) Rcpt(_ string, _ *smtp.RcptOptions) error { return nil }
+func (s *authRecordingSession) Data(r io.Reader) error {
+	_, _ = io.ReadAll(r)
+	return nil
+}
+func (s *authRecordingSession) Reset()        {}
+func (s *authRecordingSession) Logout() error { return nil }
+
+func startAuthTestServer(t *testing.T, backend *authRecordingBackend) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := smtp.NewServer(backend)
+	srv.Domain = "localhost"
+	srv.AllowInsecureAuth = true
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() { _ = srv.Close() })
+	return ln.Addr().String()
+}
+
+func TestSMTPAuthPrefersPLAIN(t *testing.T) {
+	backend := &authRecordingBackend{mechanisms: []string{"PLAIN", "LOGIN"}}
+	addr := startAuthTestServer(t, backend)
+	host, port := splitHostPort(t, addr)
+
+	sender := &SMTPSender{
+		Host: host, Port: port,
+		Username: "testuser", Password: "testpass",
+		From: "sender@test.com", TLSMode: "none",
+		Logger: slog.New(slog.NewTextHandler(os.Stderr, nil)),
+	}
+
+	if err := sender.Send(context.Background(), "r@test.com", []byte("Subject: t\r\n\r\nhi")); err != nil {
+		t.Fatal(err)
+	}
+
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+	if backend.usedMech != "PLAIN" {
+		t.Errorf("used mechanism = %q, want PLAIN", backend.usedMech)
+	}
+}
+
+func TestSMTPAuthFallsBackToLOGIN(t *testing.T) {
+	backend := &authRecordingBackend{mechanisms: []string{"LOGIN"}}
+	addr := startAuthTestServer(t, backend)
+	host, port := splitHostPort(t, addr)
+
+	sender := &SMTPSender{
+		Host: host, Port: port,
+		Username: "testuser", Password: "testpass",
+		From: "sender@test.com", TLSMode: "none",
+		Logger: slog.New(slog.NewTextHandler(os.Stderr, nil)),
+	}
+
+	if err := sender.Send(context.Background(), "r@test.com", []byte("Subject: t\r\n\r\nhi")); err != nil {
+		t.Fatal(err)
+	}
+
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+	if backend.usedMech != "LOGIN" {
+		t.Errorf("used mechanism = %q, want LOGIN", backend.usedMech)
+	}
+}
+
+func TestSMTPAuthPLAINOnlyServer(t *testing.T) {
+	backend := &authRecordingBackend{mechanisms: []string{"PLAIN"}}
+	addr := startAuthTestServer(t, backend)
+	host, port := splitHostPort(t, addr)
+
+	sender := &SMTPSender{
+		Host: host, Port: port,
+		Username: "testuser", Password: "testpass",
+		From: "sender@test.com", TLSMode: "none",
+		Logger: slog.New(slog.NewTextHandler(os.Stderr, nil)),
+	}
+
+	if err := sender.Send(context.Background(), "r@test.com", []byte("Subject: t\r\n\r\nhi")); err != nil {
+		t.Fatal(err)
+	}
+
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+	if backend.usedMech != "PLAIN" {
+		t.Errorf("used mechanism = %q, want PLAIN", backend.usedMech)
+	}
+}
