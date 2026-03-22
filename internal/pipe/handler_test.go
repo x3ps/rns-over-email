@@ -485,6 +485,121 @@ func TestRecoveryBackoffCap(t *testing.T) {
 	}
 }
 
+func TestStartupProbeSuccess(t *testing.T) {
+	t.Parallel()
+	sender := &mockSender{}
+	var mu sync.Mutex
+	var onlineCalls []bool
+	setOnline := func(online bool) {
+		mu.Lock()
+		onlineCalls = append(onlineCalls, online)
+		mu.Unlock()
+	}
+
+	h := NewHandler(sender, testLogger(), "peer@test.com", "from@test.com",
+		setOnline, 10*time.Millisecond, 100*time.Millisecond)
+
+	h.StartupProbe(context.Background())
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(onlineCalls) != 1 || onlineCalls[0] != true {
+		t.Errorf("onlineCalls = %v, want [true]", onlineCalls)
+	}
+}
+
+func TestStartupProbeFailureStartsRecovery(t *testing.T) {
+	t.Parallel()
+	sender := &mockSender{probeErr: errors.New("smtp down")}
+	var mu sync.Mutex
+	var onlineCalls []bool
+	setOnline := func(online bool) {
+		mu.Lock()
+		onlineCalls = append(onlineCalls, online)
+		mu.Unlock()
+	}
+
+	h := NewHandler(sender, testLogger(), "peer@test.com", "from@test.com",
+		setOnline, 10*time.Millisecond, 50*time.Millisecond)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	h.StartupProbe(ctx)
+
+	// Should have called setOnline(false).
+	deadline := time.After(2 * time.Second)
+	for {
+		mu.Lock()
+		hasFalse := len(onlineCalls) > 0 && !onlineCalls[0]
+		mu.Unlock()
+		if hasFalse {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for setOnline(false)")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	// Let probe succeed → recovery should call setOnline(true).
+	sender.probeMu.Lock()
+	sender.probeErr = nil
+	sender.probeMu.Unlock()
+
+	deadline = time.After(2 * time.Second)
+	for {
+		mu.Lock()
+		hasTrue := false
+		for _, v := range onlineCalls {
+			if v {
+				hasTrue = true
+			}
+		}
+		mu.Unlock()
+		if hasTrue {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for setOnline(true) after recovery")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
+func TestStartupProbeAndHandlePacketRecoveryConverge(t *testing.T) {
+	t.Parallel()
+	sender := &mockSender{failNext: 100, probeErr: errors.New("smtp down")}
+	var onlineFalseCnt atomic.Int32
+	setOnline := func(online bool) {
+		if !online {
+			onlineFalseCnt.Add(1)
+		}
+	}
+
+	h := NewHandler(sender, testLogger(), "peer@test.com", "from@test.com",
+		setOnline, 50*time.Millisecond, 200*time.Millisecond)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// StartupProbe fails → beginRecovery via CAS.
+	h.StartupProbe(ctx)
+
+	// HandlePacket exhausts retries → also calls beginRecovery, but CAS
+	// should prevent a second recovery goroutine.
+	_ = h.HandlePacket(ctx, []byte("converge-pkt"))
+
+	time.Sleep(100 * time.Millisecond)
+
+	// Exactly one setOnline(false) should have fired (CAS prevents duplicate).
+	if cnt := onlineFalseCnt.Load(); cnt != 1 {
+		t.Errorf("setOnline(false) called %d times, want 1 (CAS should prevent duplicate recovery)", cnt)
+	}
+}
+
 func TestHandlePacketEnvelopeEncodeError(t *testing.T) {
 	t.Parallel()
 	sender := &mockSender{}

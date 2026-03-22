@@ -87,6 +87,11 @@ func run(args []string) error {
 	)
 	iface.OnSend(func(pkt []byte) error { return pipeHandler.HandlePacket(ctx, pkt) })
 
+	// Verify SMTP connectivity at startup so the aggregator doesn't claim
+	// online before SMTP is confirmed. Runs in background — on success it
+	// calls agg.SetSMTP(true); on failure it enters the recovery loop.
+	go pipeHandler.StartupProbe(ctx)
+
 	// Inbound: IMAP worker.
 	inboxRepo := inbox.NewJSONRepo(cfg.Checkpoint.Path, logger)
 	inject := func(ctx context.Context, pkt []byte) error {

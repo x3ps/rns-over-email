@@ -92,14 +92,39 @@ func (h *Handler) HandlePacket(ctx context.Context, pkt []byte) error {
 		"message_id", messageID,
 		"delivery", "lost", "error", lastErr)
 
+	h.beginRecovery(ctx)
+
+	return nil
+}
+
+// beginRecovery starts a recovery goroutine if one is not already running.
+// Uses CompareAndSwap to ensure at most one recovery goroutine is active.
+// Called by both HandlePacket (on exhausted retries) and StartupProbe (on
+// initial failure).
+func (h *Handler) beginRecovery(ctx context.Context) {
 	if h.setOnline != nil && h.recoveryDelay > 0 {
 		if h.recovering.CompareAndSwap(false, true) {
 			h.setOnline(false)
 			go h.recover(ctx)
 		}
 	}
+}
 
-	return nil
+// StartupProbe verifies SMTP connectivity at startup. On success it calls
+// setOnline(true). On failure it enters the same recovery loop used by
+// HandlePacket, ensuring the interface does not claim online until SMTP is
+// verified.
+func (h *Handler) StartupProbe(ctx context.Context) {
+	if h.setOnline == nil {
+		return
+	}
+	if err := h.sender.Probe(ctx); err != nil {
+		h.logger.Warn("startup smtp probe failed, entering recovery", "error", err)
+		h.beginRecovery(ctx)
+		return
+	}
+	h.logger.Info("startup smtp probe succeeded")
+	h.setOnline(true)
 }
 
 // recover probes the SMTP server with exponential backoff until it succeeds

@@ -27,13 +27,14 @@ type Aggregator struct {
 	logger   *slog.Logger
 }
 
-// NewAggregator creates an Aggregator with initial state imap=false, smtp=true.
-// It calls callback(false) immediately to push the initial combined=false state
-// into iface.SetOnline BEFORE iface.Start(), closing the startup window where
-// go-rns-pipe defaults transportOnline=true but IMAP hasn't connected yet.
+// NewAggregator creates an Aggregator with initial state imap=false, smtp=false.
+// Both transport sub-components must be verified before the interface claims
+// online. It calls callback(false) immediately to push the initial combined=false
+// state into iface.SetOnline BEFORE iface.Start(), closing the startup window
+// where go-rns-pipe defaults transportOnline=true but neither IMAP nor SMTP has
+// been verified yet.
 func NewAggregator(callback func(bool), logger *slog.Logger) *Aggregator {
 	a := &Aggregator{
-		smtp:     true,
 		callback: callback,
 		logger:   logger.With("component", "online-aggregator"),
 		last:     true, // force initial callback(false) to fire as a transition

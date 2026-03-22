@@ -12,10 +12,7 @@ func testLogger() *slog.Logger {
 }
 
 func TestAggregatorSequence(t *testing.T) {
-	// Table-driven sequence test:
-	// initial callback(false) → SetIMAP(true) with smtp=true → callback(true)
-	// → SetSMTP(false) → callback(false) → SetSMTP(true) → callback(true)
-	// → SetIMAP(false) → callback(false)
+	// Both start false. Need both SetSMTP(true) and SetIMAP(true) for online.
 	var calls []bool
 	agg := NewAggregator(func(online bool) {
 		calls = append(calls, online)
@@ -24,6 +21,11 @@ func TestAggregatorSequence(t *testing.T) {
 	// Initial callback(false) already fired.
 	if len(calls) != 1 || calls[0] != false {
 		t.Fatalf("initial calls = %v, want [false]", calls)
+	}
+
+	agg.SetSMTP(true) // smtp=true, imap=false → combined=false (no transition)
+	if len(calls) != 1 {
+		t.Fatalf("after SetSMTP(true): calls = %v, want [false]", calls)
 	}
 
 	agg.SetIMAP(true) // smtp=true, imap=true → combined=true
@@ -68,8 +70,8 @@ func TestAggregatorIMAPDownSMTPUp(t *testing.T) {
 		calls = append(calls, online)
 	}, testLogger())
 
-	// smtp starts true, imap starts false → combined=false.
-	// SetSMTP(true) is redundant, combined stays false.
+	// smtp starts false, imap starts false → combined=false.
+	// SetSMTP(true) makes smtp=true but imap still false → combined=false.
 	agg.SetSMTP(true)
 
 	if len(calls) != 1 {
@@ -85,14 +87,15 @@ func TestAggregatorDedup(t *testing.T) {
 
 	// Redundant calls should not trigger additional callbacks.
 	agg.SetIMAP(false) // already false
-	agg.SetSMTP(true)  // already true
+	agg.SetSMTP(false) // already false
 	agg.SetIMAP(false) // still false
 
 	if len(calls) != 1 {
 		t.Errorf("calls = %v, want [false] (redundant calls should be deduped)", calls)
 	}
 
-	// Now go online.
+	// Now go online (need both).
+	agg.SetSMTP(true)
 	agg.SetIMAP(true) // combined=true → transition
 	if len(calls) != 2 || calls[1] != true {
 		t.Fatalf("calls = %v, want [false true]", calls)
@@ -103,6 +106,31 @@ func TestAggregatorDedup(t *testing.T) {
 	agg.SetSMTP(true)
 	if len(calls) != 2 {
 		t.Errorf("calls = %v, want [false true] (redundant online calls should be deduped)", calls)
+	}
+}
+
+func TestAggregatorBothInitialFalse(t *testing.T) {
+	// Verify that both SetSMTP(true) and SetIMAP(true) are needed to go online.
+	var calls []bool
+	agg := NewAggregator(func(online bool) {
+		calls = append(calls, online)
+	}, testLogger())
+
+	// Initial: [false]
+	if len(calls) != 1 || calls[0] != false {
+		t.Fatalf("initial calls = %v, want [false]", calls)
+	}
+
+	// Only IMAP → still offline.
+	agg.SetIMAP(true)
+	if len(calls) != 1 {
+		t.Fatalf("after SetIMAP(true) only: calls = %v, want [false]", calls)
+	}
+
+	// Now SMTP too → online.
+	agg.SetSMTP(true)
+	if len(calls) != 2 || calls[1] != true {
+		t.Fatalf("after both true: calls = %v, want [false true]", calls)
 	}
 }
 
