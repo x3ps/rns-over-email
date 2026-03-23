@@ -1,7 +1,9 @@
 package transport
 
 import (
+	"errors"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -270,6 +272,32 @@ func TestTimeoutConnWriteTimeout(t *testing.T) {
 	netErr, ok := err.(net.Error)
 	if !ok || !netErr.Timeout() {
 		t.Errorf("expected network timeout error, got %T: %v", err, err)
+	}
+}
+
+// deadlineFailConn is a net.Conn mock where SetReadDeadline always fails.
+type deadlineFailConn struct {
+	net.Conn
+}
+
+func (d *deadlineFailConn) SetReadDeadline(_ time.Time) error {
+	return errors.New("set read deadline: not supported")
+}
+
+func TestTimeoutConn_SetReadDeadlineError(t *testing.T) {
+	server, client := net.Pipe()
+	defer func() { _ = server.Close() }()
+	defer func() { _ = client.Close() }()
+
+	tc := NewTimeoutConn(&deadlineFailConn{Conn: client}, 5*time.Second)
+
+	buf := make([]byte, 1)
+	_, err := tc.Read(buf)
+	if err == nil {
+		t.Fatal("expected error from SetReadDeadline failure, got nil")
+	}
+	if !strings.Contains(err.Error(), "set read deadline") {
+		t.Errorf("error = %q, want substring 'set read deadline'", err.Error())
 	}
 }
 

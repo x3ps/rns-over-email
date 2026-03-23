@@ -286,3 +286,53 @@ func TestCheckpointDirectoryCreation(t *testing.T) {
 		t.Errorf("checkpoint = %d, want 5", uid)
 	}
 }
+
+func TestSave_MkdirAllError(t *testing.T) {
+	// Place a regular file where the parent directory should be.
+	// MkdirAll will fail because it can't create a directory over a file.
+	dir := t.TempDir()
+	blocker := filepath.Join(dir, "blocker")
+	if err := os.WriteFile(blocker, []byte("I am a file"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// checkpoint path: blocker/sub/checkpoint.json → MkdirAll("blocker/sub") fails.
+	path := filepath.Join(blocker, "sub", "checkpoint.json")
+	repo := NewJSONRepo(path, slog.Default())
+	ctx := context.Background()
+
+	err := repo.AdvanceCheckpoint(ctx, "INBOX", 100, 5)
+	if err == nil {
+		t.Fatal("expected MkdirAll error, got nil")
+	}
+}
+
+func TestSave_RenameConflict(t *testing.T) {
+	// Target path is a directory, so os.Rename(tmp, path) should fail.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "checkpoint.json")
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	repo := NewJSONRepo(path, slog.Default())
+	ctx := context.Background()
+
+	err := repo.AdvanceCheckpoint(ctx, "INBOX", 100, 5)
+	if err == nil {
+		t.Fatal("expected Rename error when target is a directory, got nil")
+	}
+}
+
+func TestLoad_NulBytePath(t *testing.T) {
+	// Path containing NUL byte → ReadFile error (not IsNotExist).
+	path := filepath.Join(t.TempDir(), "check\x00point.json")
+	repo := NewJSONRepo(path, slog.Default())
+	ctx := context.Background()
+
+	_, err := repo.GetCheckpoint(ctx, "INBOX", 100)
+	if err == nil {
+		t.Fatal("expected error from NUL byte path, got nil")
+	}
+	// Should not be treated as "not exist" (which returns uid=0, err=nil).
+	// The error should propagate.
+}

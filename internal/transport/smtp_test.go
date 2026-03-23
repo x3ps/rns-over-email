@@ -1156,6 +1156,32 @@ func TestSMTPSendTLSDialError(t *testing.T) {
 	}
 }
 
+func TestErrDataOutcomeUnknown_ErrorAndUnwrap(t *testing.T) {
+	inner := errors.New("connection reset by peer")
+	err := &ErrDataOutcomeUnknown{Err: inner}
+
+	// Error() should return the inner error's message.
+	if err.Error() != inner.Error() {
+		t.Errorf("Error() = %q, want %q", err.Error(), inner.Error())
+	}
+
+	// Unwrap() should return the inner error.
+	if err.Unwrap() != inner {
+		t.Errorf("Unwrap() = %v, want %v", err.Unwrap(), inner)
+	}
+
+	// errors.Is should work through the wrapper.
+	if !errors.Is(err, inner) {
+		t.Error("errors.Is(err, inner) = false, want true")
+	}
+
+	// errors.As should match the wrapper type.
+	var target *ErrDataOutcomeUnknown
+	if !errors.As(err, &target) {
+		t.Error("errors.As should match *ErrDataOutcomeUnknown")
+	}
+}
+
 func TestSMTPSendSTARTTLS(t *testing.T) {
 	cert := selfSignedCert(t, "localhost")
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
