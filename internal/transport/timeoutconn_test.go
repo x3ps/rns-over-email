@@ -253,6 +253,26 @@ func TestTimeoutConnConcurrentSetHardDeadline(t *testing.T) {
 	wg.Wait()
 }
 
+func TestTimeoutConnWriteTimeout(t *testing.T) {
+	server, client := net.Pipe()
+	defer func() { _ = server.Close() }()
+	defer func() { _ = client.Close() }()
+
+	// 1ms timeout with no reader — Write must return a timeout error.
+	// net.Pipe has no internal buffer; without a reader, the write blocks.
+	tc := NewTimeoutConn(client, 1*time.Millisecond)
+
+	// Write enough data to ensure it can't complete instantly.
+	_, err := tc.Write([]byte("hello"))
+	if err == nil {
+		t.Fatal("expected timeout error, got nil")
+	}
+	netErr, ok := err.(net.Error)
+	if !ok || !netErr.Timeout() {
+		t.Errorf("expected network timeout error, got %T: %v", err, err)
+	}
+}
+
 // TestTimeoutConnConcurrentReadWrite verifies that concurrent Read and Write
 // use direction-specific deadlines and don't interfere with each other.
 // Run with -race to detect races.
