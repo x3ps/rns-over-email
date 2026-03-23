@@ -1,0 +1,59 @@
+services:
+  mail:
+    # greenmail/standalone:2.1.8
+    image: greenmail/standalone:2.1.8@sha256:d556b8c7df01ba04a0e0f67dacab2c5f75a61207a51774e0654c179b83a671e1
+    environment:
+      JAVA_OPTS: >-
+        -Dgreenmail.setup.test.smtp
+        -Dgreenmail.setup.test.imap
+        -Dgreenmail.hostname=0.0.0.0
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/3025'"]
+      interval: 3s
+      timeout: 2s
+      retries: 10
+    networks:
+      - demo
+
+  node-a:
+    build:
+      context: ..
+      dockerfile: example/Dockerfile.node
+    depends_on:
+      mail:
+        condition: service_healthy
+    ports:
+      - "8001:8000"
+    volumes:
+      - ./config/node-a.conf:/etc/reticulum/config:ro
+    secrets:
+      - source: alice
+        target: password
+    networks:
+      - demo
+
+  node-b:
+    build:
+      context: ..
+      dockerfile: example/Dockerfile.node
+    depends_on:
+      mail:
+        condition: service_healthy
+    ports:
+      - "8002:8000"
+    volumes:
+      - ./config/node-b.conf:/etc/reticulum/config:ro
+    secrets:
+      - source: bob
+        target: password
+    networks:
+      - demo
+
+secrets:
+  alice:
+    file: secrets/alice.txt
+  bob:
+    file: secrets/bob.txt
+
+networks:
+  demo:

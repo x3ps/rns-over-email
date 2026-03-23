@@ -1,0 +1,43 @@
+# syntax=docker/dockerfile:1
+
+# --- Go builder: compile rns-over-email ---
+# golang:1.26
+FROM golang:1.26@sha256:595c7847cff97c9a9e76f015083c481d26078f961c9c8dca3923132f51fe12f1 AS go-builder
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY cmd/ cmd/
+COPY internal/ internal/
+RUN CGO_ENABLED=0 go build -o /rns-over-email ./cmd/rns-over-email
+
+# --- Frontend builder: build meshchat UI ---
+# node:24-slim
+FROM node:24-slim@sha256:4bd6219054c8bebcd26a66bfd8ca0bd6e1024b4b97474c59bb7ee3bbcbef4fe8 AS frontend-builder
+RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
+# v2.3.0 — https://github.com/liamcottle/reticulum-meshchat/releases/tag/v2.3.0
+ARG MESHCHAT_REF=011876bec5e9233030af62ccc17225d9f9de3bc2
+RUN git init /meshchat && cd /meshchat \
+    && git fetch --depth 1 https://github.com/liamcottle/reticulum-meshchat "$MESHCHAT_REF" \
+    && git checkout FETCH_HEAD
+WORKDIR /meshchat
+RUN npm ci --omit=dev && npm run build-frontend
+
+# --- Runtime: meshchat + rns-over-email ---
+# python:3.13-slim
+FROM python:3.13-slim@sha256:739e7213785e88c0f702dcdc12c0973afcbd606dbf021a589cab77d6b00b579d
+COPY --from=frontend-builder /meshchat/requirements.txt /opt/meshchat/
+WORKDIR /opt/meshchat
+RUN pip install --no-cache-dir -r requirements.txt
+COPY --from=frontend-builder /meshchat/public /opt/meshchat/public
+COPY --from=frontend-builder /meshchat/*.py /opt/meshchat/
+COPY --from=frontend-builder /meshchat/src/__init__.py /opt/meshchat/src/
+COPY --from=frontend-builder /meshchat/src/backend /opt/meshchat/src/backend
+COPY --from=frontend-builder /meshchat/*.json /opt/meshchat/
+COPY --from=go-builder /rns-over-email /usr/local/bin/
+COPY example/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+RUN groupadd -r meshchat && useradd -r -g meshchat -d /data meshchat
+RUN mkdir -p /data && chown meshchat:meshchat /data
+USER meshchat
+WORKDIR /data
+ENTRYPOINT ["/entrypoint.sh"]
