@@ -387,9 +387,9 @@ func TestEncodeRequiresParams(t *testing.T) {
 }
 
 func TestDecodeBodyTooLarge(t *testing.T) {
-	// Build a message whose body exceeds maxBodySize.
+	// Build a message whose body exceeds MaxBodySize.
 	header := "From: a@b.com\r\nTo: b@c.com\r\nSubject: RNS Transport Packet\r\nMIME-Version: 1.0\r\nContent-Type: application/octet-stream\r\n\r\n"
-	body := make([]byte, maxBodySize+1)
+	body := make([]byte, MaxBodySize+1)
 	for i := range body {
 		body[i] = 'A'
 	}
@@ -462,9 +462,9 @@ func TestMessageIDFormat(t *testing.T) {
 }
 
 func TestBodySizeExactlyAtLimit(t *testing.T) {
-	// Body of exactly maxBodySize bytes must be accepted (boundary: > not >=).
+	// Body of exactly MaxBodySize bytes must be accepted (boundary: > not >=).
 	header := "From: a@b.com\r\nTo: b@c.com\r\nSubject: RNS Transport Packet\r\nMIME-Version: 1.0\r\nContent-Type: application/octet-stream\r\n\r\n"
-	body := bytes.Repeat([]byte("A"), maxBodySize)
+	body := bytes.Repeat([]byte("A"), MaxBodySize)
 	raw := append([]byte(header), body...)
 
 	_, err := Decode(raw)

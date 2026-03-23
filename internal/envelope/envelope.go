@@ -92,19 +92,19 @@ func domainFromAddr(addr string) string {
 	return "rns-transport"
 }
 
-// maxBodySize limits how many bytes Decode will read from the message body
+// MaxBodySize limits how many bytes Decode will read from the message body
 // to prevent OOM from maliciously large emails (1 MB).
-const maxBodySize = 1 << 20
+const MaxBodySize = 1 << 20
 
 // MaxPacketSize is the largest packet that roundtrips through Encode → Decode
-// without the base64-wrapped body exceeding maxBodySize.
+// without the base64-wrapped body exceeding MaxBodySize.
 //
 // Derivation: Encode wraps base64 at 76 chars + "\r\n" per line (78 bytes
-// encoding 57 raw bytes). For maxBodySize bytes of body budget:
+// encoding 57 raw bytes). For MaxBodySize bytes of body budget:
 //
-//	full lines:  floor(maxBodySize / 78) * 57  decoded bytes
-//	remainder:   (maxBodySize%78 - 2) / 4 * 3  decoded bytes  (subtract \r\n, base64-decode)
-const MaxPacketSize = (maxBodySize/78)*57 + (maxBodySize%78-2)/4*3 // 766266
+//	full lines:  floor(MaxBodySize / 78) * 57  decoded bytes
+//	remainder:   (MaxBodySize%78 - 2) / 4 * 3  decoded bytes  (subtract \r\n, base64-decode)
+const MaxPacketSize = (MaxBodySize/78)*57 + (MaxBodySize%78-2)/4*3 // 766266
 
 // Decoded holds the parsed result of a MIME envelope.
 type Decoded struct {
@@ -209,12 +209,12 @@ func Decode(raw []byte) (*Decoded, error) {
 	}
 
 	// Phase B: read and decode body.
-	body, err := io.ReadAll(io.LimitReader(msg.Body, maxBodySize+1))
+	body, err := io.ReadAll(io.LimitReader(msg.Body, MaxBodySize+1))
 	if err != nil {
 		return nil, fmt.Errorf("read body: %w", err)
 	}
-	if len(body) > maxBodySize {
-		return nil, fmt.Errorf("body exceeds maximum size of %d bytes", maxBodySize)
+	if len(body) > MaxBodySize {
+		return nil, fmt.Errorf("body exceeds maximum size of %d bytes", MaxBodySize)
 	}
 	d.Packet, err = decodeBody(body, msg.Header.Get("Content-Transfer-Encoding"))
 	if err != nil {
