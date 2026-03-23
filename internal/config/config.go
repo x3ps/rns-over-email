@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/x3ps/rns-iface-email/internal/envelope"
 )
 
 // Config holds all configuration for the email transport.
@@ -480,6 +482,12 @@ func Validate(cfg *Config) error {
 	}
 	if cfg.Pipe.MTU <= 0 {
 		errs = append(errs, "pipe.mtu must be positive")
+	}
+	if cfg.Pipe.MTU > envelope.MaxPacketSize {
+		errs = append(errs, fmt.Sprintf(
+			"pipe.mtu %d exceeds maximum decodable packet size (%d bytes); "+
+				"the remote peer's inbound decoder would reject it",
+			cfg.Pipe.MTU, envelope.MaxPacketSize))
 	}
 	if cfg.SMTP.Port <= 0 || cfg.SMTP.Port > 65535 {
 		errs = append(errs, "smtp.port must be 1-65535")

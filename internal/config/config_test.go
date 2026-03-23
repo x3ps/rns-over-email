@@ -888,6 +888,22 @@ func TestCheckpointPathDistinctForDistinctNames(t *testing.T) {
 	}
 }
 
+func TestValidation_MTUExceedsMaxPacketSize(t *testing.T) {
+	cfg := validConfig()
+	cfg.Pipe.MTU = 766267 // MaxPacketSize + 1
+	if err := Validate(&cfg); err == nil {
+		t.Error("expected validation error for MTU > MaxPacketSize, got nil")
+	}
+}
+
+func TestValidation_MTUAtMaxPacketSize(t *testing.T) {
+	cfg := validConfig()
+	cfg.Pipe.MTU = 766266 // MaxPacketSize
+	if err := Validate(&cfg); err != nil {
+		t.Errorf("MTU = MaxPacketSize should pass validation, got: %v", err)
+	}
+}
+
 func TestCheckpointPathCustomPipeName(t *testing.T) {
 	args := append(validArgs(), "--pipe-name", "MyCustomPipe")
 	cfg, err := Load(args)

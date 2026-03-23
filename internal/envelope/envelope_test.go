@@ -736,6 +736,54 @@ func TestDecodeBodyUnknownEncoding(t *testing.T) {
 	}
 }
 
+func TestMaxPacketSizeRoundtrip(t *testing.T) {
+	packet := make([]byte, MaxPacketSize)
+	for i := range packet {
+		packet[i] = byte(i % 256)
+	}
+
+	raw, _, err := Encode(Params{
+		From:   "a@b.com",
+		To:     "c@d.com",
+		Packet: packet,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	decoded, err := Decode(raw)
+	if err != nil {
+		t.Fatalf("Decode failed for MaxPacketSize packet: %v", err)
+	}
+	if !bytes.Equal(decoded.Packet, packet) {
+		t.Errorf("roundtrip mismatch: got %d bytes, want %d", len(decoded.Packet), len(packet))
+	}
+}
+
+func TestMaxPacketSizePlusOneDecodeRejects(t *testing.T) {
+	packet := make([]byte, MaxPacketSize+1)
+	for i := range packet {
+		packet[i] = byte(i % 256)
+	}
+
+	raw, _, err := Encode(Params{
+		From:   "a@b.com",
+		To:     "c@d.com",
+		Packet: packet,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = Decode(raw)
+	if err == nil {
+		t.Fatal("expected error for MaxPacketSize+1 packet, got nil")
+	}
+	if !strings.Contains(err.Error(), "body exceeds maximum size") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
 func TestDecodeBodyIdentityEncodings(t *testing.T) {
 	for _, cte := range []string{"7bit", "8bit", "binary", ""} {
 		t.Run("cte="+cte, func(t *testing.T) {

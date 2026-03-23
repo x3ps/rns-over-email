@@ -96,6 +96,16 @@ func domainFromAddr(addr string) string {
 // to prevent OOM from maliciously large emails (1 MB).
 const maxBodySize = 1 << 20
 
+// MaxPacketSize is the largest packet that roundtrips through Encode → Decode
+// without the base64-wrapped body exceeding maxBodySize.
+//
+// Derivation: Encode wraps base64 at 76 chars + "\r\n" per line (78 bytes
+// encoding 57 raw bytes). For maxBodySize bytes of body budget:
+//
+//	full lines:  floor(maxBodySize / 78) * 57  decoded bytes
+//	remainder:   (maxBodySize%78 - 2) / 4 * 3  decoded bytes  (subtract \r\n, base64-decode)
+const MaxPacketSize = (maxBodySize/78)*57 + (maxBodySize%78-2)/4*3 // 766266
+
 // Decoded holds the parsed result of a MIME envelope.
 type Decoded struct {
 	MessageID string
