@@ -56,6 +56,41 @@ From/To address validation applies to all transport formats (new and legacy). Th
 
 **Duplicate injection**: When a corrupt transport message blocks the checkpoint, valid messages above it are still injected into RNS but not checkpointed. On session restart, they will be re-fetched and re-injected. This is safe because RNS deduplicates packets by hash.
 
+### Transport email format
+
+Outbound transport messages are sent as a single-part MIME email with a raw RNS packet in the body:
+
+```eml
+From: sender@example.com
+To: peer@example.com
+Subject: RNS Transport Packet
+Date: Tue, 23 Mar 2026 12:34:56 +0000
+Message-ID: <550e8400-e29b-41d4-a716-446655440000@example.com>
+MIME-Version: 1.0
+Content-Type: application/octet-stream
+Content-Transfer-Encoding: base64
+X-RNS-Transport: 1
+
+AQIDBAUGBwgJCgsMDQ4PEA==
+```
+
+Header semantics:
+
+- `From` — local transport email address (`--smtp-from`).
+- `To` — remote peer email address (`--peer-email`).
+- `Subject` — legacy compatibility marker. The decoder accepts legacy transport mail identified by `Subject: RNS Transport Packet` plus `Content-Type: application/octet-stream` even when `X-RNS-Transport` is missing.
+- `Date` — UTC timestamp of envelope creation.
+- `Message-ID` — unique identifier generated for the email; useful for diagnostics and mail server tracing.
+- `MIME-Version: 1.0` — declares MIME formatting.
+- `Content-Type: application/octet-stream` — marks the body as opaque binary transport payload rather than human-readable text.
+- `Content-Transfer-Encoding: base64` — encodes the raw RNS packet into RFC-compliant mail-safe text.
+- `X-RNS-Transport: 1` — primary transport marker for the current format.
+
+Body semantics:
+
+- The body is the raw RNS packet bytes encoded with Base64.
+- Base64 lines are wrapped at 76 characters per RFC 2045.
+
 ### Config validation
 
 Invalid values in environment variables cause immediate startup failure rather than silently falling back to defaults. Integer-only variables (`RNS_EMAIL_PIPE_MTU`, `RNS_EMAIL_SMTP_PORT`, `RNS_EMAIL_IMAP_PORT`, `RNS_EMAIL_SMTP_RECOVERY_DELAY`, `RNS_EMAIL_SMTP_MAX_RECOVERY_DELAY`, `RNS_EMAIL_IMAP_RECONNECT_DELAY`, `RNS_EMAIL_IMAP_MAX_RECONNECT_DELAY`) reject non-integer input. Duration variables (`RNS_EMAIL_IMAP_POLL_INTERVAL`) reject unparseable Go duration strings. `max_*` delay values must be greater than or equal to their corresponding base values.
@@ -63,6 +98,31 @@ Invalid values in environment variables cause immediate startup failure rather t
 ### State
 
 - **checkpoint.json** — IMAP polling watermark (folder + uidvalidity -> last_uid). Atomic writes (temp+rename).
+
+Example:
+
+```json
+{
+  "folder": "INBOX",
+  "uidvalidity": 12345,
+  "last_uid": 678
+}
+```
+
+Field semantics:
+
+- `folder` — IMAP mailbox name this checkpoint belongs to, typically `INBOX`.
+- `uidvalidity` — IMAP `UIDVALIDITY` value for that mailbox. This distinguishes one mailbox identity/version from another.
+- `last_uid` — highest successfully checkpointed IMAP UID processed for that `folder` and `uidvalidity`.
+
+State behavior:
+
+- The file tracks only inbound IMAP progress. It does not store outbound queue state, packet history, or peer metadata.
+- If `uidvalidity` changes, the old checkpoint is treated as invalid and progress restarts from UID `0` for the new mailbox identity.
+- If the file is missing, the worker starts from UID `0`.
+- If the file is corrupt JSON, the worker logs a warning and starts from UID `0`.
+- Writes are atomic: the file is written to a temporary path and then renamed into place.
+- The current implementation stores a single checkpoint record, not a map of multiple folders.
 
 ---
 
