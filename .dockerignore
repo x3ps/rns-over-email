@@ -1,0 +1,11 @@
+.git
+.github
+.claude
+example/secrets
+vendor
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+*.out
