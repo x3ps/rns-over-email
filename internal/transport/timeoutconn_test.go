@@ -137,6 +137,122 @@ func TestTimeoutConnConcurrentSetTimeoutRead(t *testing.T) {
 	wg.Wait()
 }
 
+func TestTimeoutConnHardDeadline(t *testing.T) {
+	server, client := net.Pipe()
+	defer func() { _ = server.Close() }()
+	defer func() { _ = client.Close() }()
+
+	tc := NewTimeoutConn(client, 5*time.Second)
+	tc.SetHardDeadline(time.Now().Add(100 * time.Millisecond))
+
+	buf := make([]byte, 1)
+	start := time.Now()
+	_, err := tc.Read(buf) // no writer — should timeout at hard deadline
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected timeout error, got nil")
+	}
+	netErr, ok := err.(net.Error)
+	if !ok || !netErr.Timeout() {
+		t.Errorf("expected network timeout error, got %T: %v", err, err)
+	}
+	if elapsed > time.Second {
+		t.Errorf("Read took %v, expected ~100ms (hard deadline)", elapsed)
+	}
+}
+
+func TestTimeoutConnHardDeadlinePerOpShorter(t *testing.T) {
+	server, client := net.Pipe()
+	defer func() { _ = server.Close() }()
+	defer func() { _ = client.Close() }()
+
+	// Per-op timeout is 1ms, hard deadline is far in the future.
+	tc := NewTimeoutConn(client, 1*time.Millisecond)
+	tc.SetHardDeadline(time.Now().Add(10 * time.Second))
+
+	buf := make([]byte, 1)
+	start := time.Now()
+	_, err := tc.Read(buf)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected timeout error, got nil")
+	}
+	if elapsed > time.Second {
+		t.Errorf("Read took %v, expected ~1ms (per-op shorter)", elapsed)
+	}
+}
+
+func TestTimeoutConnClearHardDeadline(t *testing.T) {
+	server, client := net.Pipe()
+	defer func() { _ = server.Close() }()
+	defer func() { _ = client.Close() }()
+
+	tc := NewTimeoutConn(client, 5*time.Second)
+	tc.SetHardDeadline(time.Now().Add(1 * time.Millisecond))
+	time.Sleep(5 * time.Millisecond) // let hard deadline pass
+
+	// Clear the hard deadline.
+	tc.SetHardDeadline(time.Time{})
+
+	// Now write data to the server side so Read succeeds.
+	go func() {
+		_, _ = server.Write([]byte("x"))
+	}()
+
+	buf := make([]byte, 1)
+	_, err := tc.Read(buf)
+	if err != nil {
+		t.Fatalf("Read after clearing hard deadline should succeed, got: %v", err)
+	}
+}
+
+// TestTimeoutConnConcurrentSetHardDeadline verifies no data race when
+// SetHardDeadline is called concurrently with Read.
+// Run with -race to detect races.
+func TestTimeoutConnConcurrentSetHardDeadline(t *testing.T) {
+	server, client := net.Pipe()
+	defer func() { _ = server.Close() }()
+	defer func() { _ = client.Close() }()
+
+	tc := NewTimeoutConn(client, 5*time.Second)
+
+	var wg sync.WaitGroup
+
+	// Writer goroutine: feed data so reads don't block.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 100; i++ {
+			if _, err := server.Write([]byte("x")); err != nil {
+				return
+			}
+		}
+	}()
+
+	// Reader goroutine.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		buf := make([]byte, 1)
+		for i := 0; i < 100; i++ {
+			_, _ = tc.Read(buf)
+		}
+	}()
+
+	// Concurrent SetHardDeadline calls.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 100; i++ {
+			tc.SetHardDeadline(time.Now().Add(time.Duration(i+1) * time.Second))
+		}
+	}()
+
+	wg.Wait()
+}
+
 // TestTimeoutConnConcurrentReadWrite verifies that concurrent Read and Write
 // use direction-specific deadlines and don't interfere with each other.
 // Run with -race to detect races.

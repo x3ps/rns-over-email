@@ -28,18 +28,25 @@ type SMTPSender struct {
 }
 
 // connect dials the SMTP server, creates a client with the configured TLS
-// mode, and authenticates. The caller must Close the returned client.
-func (s *SMTPSender) connect(ctx context.Context, label string) (*smtp.Client, error) {
+// mode, and authenticates. The caller must Close the returned client and
+// clear the hard deadline on the returned TimeoutConn when done.
+func (s *SMTPSender) connect(ctx context.Context, label string) (*smtp.Client, *TimeoutConn, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	tc, dialErr := DialTCP(ctx, s.Host, s.Port, s.TLSMode, smtpDialTimeout, smtpIOTimeout)
 	if dialErr != nil {
 		if s.TLSMode == "tls" {
-			return nil, fmt.Errorf("%s dial tls: %w", label, dialErr)
+			return nil, nil, fmt.Errorf("%s dial tls: %w", label, dialErr)
 		}
-		return nil, fmt.Errorf("%s dial: %w", label, dialErr)
+		return nil, nil, fmt.Errorf("%s dial: %w", label, dialErr)
+	}
+
+	// Propagate context deadline to the connection so STARTTLS, AUTH, and
+	// subsequent SMTP commands respect the caller's timeout budget.
+	if deadline, ok := ctx.Deadline(); ok {
+		tc.SetHardDeadline(deadline)
 	}
 
 	var c *smtp.Client
@@ -48,7 +55,7 @@ func (s *SMTPSender) connect(ctx context.Context, label string) (*smtp.Client, e
 		c, err = smtp.NewClientStartTLS(tc, &tls.Config{ServerName: s.Host})
 		if err != nil {
 			_ = tc.Close()
-			return nil, fmt.Errorf("%s starttls: %w", label, err)
+			return nil, nil, fmt.Errorf("%s starttls: %w", label, err)
 		}
 	} else {
 		c = smtp.NewClient(tc)
@@ -56,7 +63,7 @@ func (s *SMTPSender) connect(ctx context.Context, label string) (*smtp.Client, e
 
 	if err := ctx.Err(); err != nil {
 		_ = c.Close()
-		return nil, err
+		return nil, nil, err
 	}
 
 	var auth sasl.Client
@@ -73,18 +80,21 @@ func (s *SMTPSender) connect(ctx context.Context, label string) (*smtp.Client, e
 	}
 	if err := c.Auth(auth); err != nil {
 		_ = c.Close()
-		return nil, fmt.Errorf("%s auth: %w", label, err)
+		return nil, nil, fmt.Errorf("%s auth: %w", label, err)
 	}
 
-	return c, nil
+	return c, tc, nil
 }
 
 func (s *SMTPSender) Send(ctx context.Context, to string, msg []byte) error {
-	c, err := s.connect(ctx, "smtp")
+	c, tc, err := s.connect(ctx, "smtp")
 	if err != nil {
 		return err
 	}
-	defer func() { _ = c.Close() }()
+	defer func() {
+		tc.SetHardDeadline(time.Time{})
+		_ = c.Close()
+	}()
 
 	if err := ctx.Err(); err != nil {
 		return err
@@ -116,11 +126,14 @@ func (s *SMTPSender) Send(ctx context.Context, to string, msg []byte) error {
 // message. It is used to verify that the server is reachable and credentials
 // are valid before bringing the interface back online.
 func (s *SMTPSender) Probe(ctx context.Context) error {
-	c, err := s.connect(ctx, "smtp probe")
+	c, tc, err := s.connect(ctx, "smtp probe")
 	if err != nil {
 		return err
 	}
-	defer func() { _ = c.Close() }()
+	defer func() {
+		tc.SetHardDeadline(time.Time{})
+		_ = c.Close()
+	}()
 
 	_ = c.Quit()
 	return nil

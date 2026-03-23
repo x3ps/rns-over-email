@@ -604,3 +604,147 @@ func TestSMTPAuthPLAINOnlyServer(t *testing.T) {
 		t.Errorf("used mechanism = %q, want PLAIN", backend.usedMech)
 	}
 }
+
+func TestSMTPConnectRespectsContextDeadline(t *testing.T) {
+	// Slow SMTP server that delays AUTH response. Context deadline must cut it short.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer func() { _ = conn.Close() }()
+				write := func(s string) { _, _ = conn.Write([]byte(s + "\r\n")) }
+				buf := make([]byte, 4096)
+				readline := func() string {
+					var line []byte
+					for {
+						n, err := conn.Read(buf[:1])
+						if n == 0 || err != nil {
+							break
+						}
+						line = append(line, buf[0])
+						if len(line) >= 2 && line[len(line)-2] == '\r' && line[len(line)-1] == '\n' {
+							return strings.TrimRight(string(line), "\r\n")
+						}
+					}
+					return string(line)
+				}
+
+				write("220 localhost ESMTP test")
+				readline() // EHLO
+				write("250-localhost")
+				write("250 AUTH PLAIN")
+				readline() // AUTH PLAIN <creds>
+				// Delay AUTH response — context should fire before this completes.
+				time.Sleep(5 * time.Second)
+				write("235 ok")
+			}()
+		}
+	}()
+
+	host, port := splitHostPort(t, ln.Addr().String())
+	sender := &SMTPSender{
+		Host:     host,
+		Port:     port,
+		Username: "testuser",
+		Password: "testpass",
+		From:     "sender@test.com",
+		TLSMode:  "none",
+		Logger:   slog.New(slog.NewTextHandler(os.Stderr, nil)),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	err = sender.Send(ctx, "receiver@test.com", []byte("Subject: test\r\n\r\nDeadline test"))
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected error from context deadline")
+	}
+	if elapsed > 2*time.Second {
+		t.Errorf("Send took %v, expected prompt return near 200ms deadline", elapsed)
+	}
+}
+
+func TestSMTPSendRespectsContextDeadline(t *testing.T) {
+	// SMTP server that authenticates normally but delays MAIL FROM response.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer func() { _ = conn.Close() }()
+				write := func(s string) { _, _ = conn.Write([]byte(s + "\r\n")) }
+				buf := make([]byte, 4096)
+				readline := func() string {
+					var line []byte
+					for {
+						n, err := conn.Read(buf[:1])
+						if n == 0 || err != nil {
+							break
+						}
+						line = append(line, buf[0])
+						if len(line) >= 2 && line[len(line)-2] == '\r' && line[len(line)-1] == '\n' {
+							return strings.TrimRight(string(line), "\r\n")
+						}
+					}
+					return string(line)
+				}
+
+				write("220 localhost ESMTP test")
+				readline() // EHLO
+				write("250-localhost")
+				write("250 AUTH PLAIN")
+				readline() // AUTH PLAIN <creds>
+				write("235 ok")
+				readline() // MAIL FROM
+				// Delay MAIL FROM response — context should fire.
+				time.Sleep(5 * time.Second)
+				write("250 ok")
+			}()
+		}
+	}()
+
+	host, port := splitHostPort(t, ln.Addr().String())
+	sender := &SMTPSender{
+		Host:     host,
+		Port:     port,
+		Username: "testuser",
+		Password: "testpass",
+		From:     "sender@test.com",
+		TLSMode:  "none",
+		Logger:   slog.New(slog.NewTextHandler(os.Stderr, nil)),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	err = sender.Send(ctx, "receiver@test.com", []byte("Subject: test\r\n\r\nDeadline test"))
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected error from context deadline")
+	}
+	if elapsed > 2*time.Second {
+		t.Errorf("Send took %v, expected prompt return near 500ms deadline", elapsed)
+	}
+}
