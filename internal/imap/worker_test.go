@@ -12,6 +12,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/x3ps/rns-iface-email/internal/config"
@@ -410,47 +411,50 @@ func TestInjectContextCancellation(t *testing.T) {
 }
 
 func TestPollLoopTriggersFetch(t *testing.T) {
-	repo := newTestRepo(t)
+	synctest.Test(t, func(t *testing.T) {
+		repo := newTestRepo(t)
 
-	var injected int
-	inject := func(_ context.Context, _ []byte) error {
-		injected++
-		return nil
-	}
+		var injected int
+		inject := func(_ context.Context, _ []byte) error {
+			injected++
+			return nil
+		}
 
-	mock := &mockClient{
-		selectState: MailboxState{UIDValidity: 100},
-		hasIdle:     false,
-	}
+		mock := &mockClient{
+			selectState: MailboxState{UIDValidity: 100},
+			hasIdle:     false,
+		}
 
-	w := &Worker{
-		cfg: config.IMAPConfig{
-			Folder:       "INBOX",
-			PollInterval: config.Duration{Duration: 50 * time.Millisecond},
-		},
-		peerEmail:  "from@test.com",
-		localEmail: "to@test.com",
-		repo:       repo,
-		inject:     inject,
-		logger:     testLogger(),
-	}
+		w := &Worker{
+			cfg: config.IMAPConfig{
+				Folder:       "INBOX",
+				PollInterval: config.Duration{Duration: 50 * time.Millisecond},
+			},
+			peerEmail:  "from@test.com",
+			localEmail: "to@test.com",
+			repo:       repo,
+			inject:     inject,
+			logger:     testLogger(),
+		}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() {
-		done <- w.pollLoop(ctx, mock, 0, "INBOX", 100)
-	}()
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		go func() {
+			done <- w.pollLoop(ctx, mock, 0, "INBOX", 100)
+		}()
 
-	time.Sleep(200 * time.Millisecond)
-	cancel()
-	<-done
+		// In synctest, time.Sleep uses virtual time — advances instantly.
+		time.Sleep(200 * time.Millisecond)
+		cancel()
+		<-done
 
-	if mock.noopCalled.Load() == 0 {
-		t.Error("expected at least one noop call")
-	}
-	if mock.fetchCalled.Load() == 0 {
-		t.Error("expected at least one fetch call")
-	}
+		if mock.noopCalled.Load() == 0 {
+			t.Error("expected at least one noop call")
+		}
+		if mock.fetchCalled.Load() == 0 {
+			t.Error("expected at least one fetch call")
+		}
+	})
 }
 
 func TestUIDValidityChange(t *testing.T) {
@@ -470,36 +474,38 @@ func TestUIDValidityChange(t *testing.T) {
 }
 
 func TestReconnectBackoff(t *testing.T) {
-	repo := newTestRepo(t)
+	synctest.Test(t, func(t *testing.T) {
+		repo := newTestRepo(t)
 
-	inject := func(_ context.Context, _ []byte) error { return nil }
+		inject := func(_ context.Context, _ []byte) error { return nil }
 
-	dialCount := 0
-	w := &Worker{
-		cfg: config.IMAPConfig{
-			Folder:            "INBOX",
-			PollInterval:      config.Duration{Duration: time.Hour},
-			ReconnectDelay:    1, // 1s base — small enough for the test timeout
-			MaxReconnectDelay: 4, // 4s cap
-		},
-		peerEmail:  "from@test.com",
-		localEmail: "to@test.com",
-		repo:       repo,
-		inject:     inject,
-		logger:     testLogger(),
-	}
-	w.dial = func(ctx context.Context, _ func()) (Client, error) {
-		dialCount++
-		return nil, errors.New("connection refused")
-	}
+		dialCount := 0
+		w := &Worker{
+			cfg: config.IMAPConfig{
+				Folder:            "INBOX",
+				PollInterval:      config.Duration{Duration: time.Hour},
+				ReconnectDelay:    1, // 1s base
+				MaxReconnectDelay: 4, // 4s cap
+			},
+			peerEmail:  "from@test.com",
+			localEmail: "to@test.com",
+			repo:       repo,
+			inject:     inject,
+			logger:     testLogger(),
+		}
+		w.dial = func(ctx context.Context, _ func()) (Client, error) {
+			dialCount++
+			return nil, errors.New("connection refused")
+		}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
 
-	_ = w.Run(ctx)
-	if dialCount < 2 {
-		t.Errorf("dialCount = %d, want >= 2 (need multiple attempts to verify backoff)", dialCount)
-	}
+		_ = w.Run(ctx)
+		if dialCount < 2 {
+			t.Errorf("dialCount = %d, want >= 2 (need multiple attempts to verify backoff)", dialCount)
+		}
+	})
 }
 
 func TestIdleExistsNotificationTriggersFetch(t *testing.T) {
@@ -550,180 +556,167 @@ func TestIdleExistsNotificationTriggersFetch(t *testing.T) {
 }
 
 func TestShutdownDuringInjectRetry(t *testing.T) {
-	repo := newTestRepo(t)
+	synctest.Test(t, func(t *testing.T) {
+		repo := newTestRepo(t)
 
-	inject := func(ctx context.Context, _ []byte) error {
-		for {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(50 * time.Millisecond):
-				return errors.New("offline")
+		inject := func(ctx context.Context, _ []byte) error {
+			for {
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(50 * time.Millisecond):
+					return errors.New("offline")
+				}
 			}
 		}
-	}
 
-	raw := makeTestEnvelope(t, []byte("shutdown-pkt"))
-	w := &Worker{
-		cfg: config.IMAPConfig{
-			Folder:       "INBOX",
-			PollInterval: config.Duration{Duration: time.Hour},
-		},
-		peerEmail:  "from@test.com",
-		localEmail: "to@test.com",
-		repo:       repo,
-		inject:     inject,
-		logger:     testLogger(),
-	}
-	w.dial = func(ctx context.Context, _ func()) (Client, error) {
-		mock := &mockClient{
-			selectState: MailboxState{UIDValidity: 100},
-			fetchMsgs:   []fetchMsg{{uid: 1, raw: raw}},
-			hasIdle:     false,
+		raw := makeTestEnvelope(t, []byte("shutdown-pkt"))
+		w := &Worker{
+			cfg: config.IMAPConfig{
+				Folder:       "INBOX",
+				PollInterval: config.Duration{Duration: time.Hour},
+			},
+			peerEmail:  "from@test.com",
+			localEmail: "to@test.com",
+			repo:       repo,
+			inject:     inject,
+			logger:     testLogger(),
 		}
-		return mock, nil
-	}
+		w.dial = func(ctx context.Context, _ func()) (Client, error) {
+			mock := &mockClient{
+				selectState: MailboxState{UIDValidity: 100},
+				fetchMsgs:   []fetchMsg{{uid: 1, raw: raw}},
+				hasIdle:     false,
+			}
+			return mock, nil
+		}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() {
-		done <- w.Run(ctx)
-	}()
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		go func() {
+			done <- w.Run(ctx)
+		}()
 
-	time.Sleep(200 * time.Millisecond)
-	cancel()
-
-	select {
-	case <-done:
-	case <-time.After(3 * time.Second):
-		t.Fatal("worker did not exit within timeout after cancellation")
-	}
+		// Advance virtual time past the inject retry loop.
+		time.Sleep(200 * time.Millisecond)
+		cancel()
+		<-done
+	})
 }
 
 func TestIdleErrorFallbackToPoll(t *testing.T) {
-	repo := newTestRepo(t)
+	synctest.Test(t, func(t *testing.T) {
+		repo := newTestRepo(t)
 
-	inject := func(_ context.Context, _ []byte) error { return nil }
+		inject := func(_ context.Context, _ []byte) error { return nil }
 
-	idleCh := make(chan struct{})
-	close(idleCh)
-	mock := &mockClient{
-		selectState: MailboxState{UIDValidity: 100},
-		hasIdle:     true,
-		idleCh:      idleCh,
-		idleErr:     errors.New("idle failed"),
-	}
+		idleCh := make(chan struct{})
+		close(idleCh)
+		mock := &mockClient{
+			selectState: MailboxState{UIDValidity: 100},
+			hasIdle:     true,
+			idleCh:      idleCh,
+			idleErr:     errors.New("idle failed"),
+		}
 
-	w := &Worker{
-		cfg: config.IMAPConfig{
-			Folder:       "INBOX",
-			PollInterval: config.Duration{Duration: 50 * time.Millisecond},
-		},
-		peerEmail:  "from@test.com",
-		localEmail: "to@test.com",
-		repo:       repo,
-		inject:     inject,
-		logger:     testLogger(),
-	}
+		w := &Worker{
+			cfg: config.IMAPConfig{
+				Folder:       "INBOX",
+				PollInterval: config.Duration{Duration: 50 * time.Millisecond},
+			},
+			peerEmail:  "from@test.com",
+			localEmail: "to@test.com",
+			repo:       repo,
+			inject:     inject,
+			logger:     testLogger(),
+		}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() {
-		done <- w.idleLoop(ctx, mock, 0, "INBOX", 100, make(chan struct{}, 1))
-	}()
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		go func() {
+			done <- w.idleLoop(ctx, mock, 0, "INBOX", 100, make(chan struct{}, 1))
+		}()
 
-	time.Sleep(500 * time.Millisecond)
-	cancel()
-	<-done
+		// Advance virtual time to allow idle errors, fallback to poll, and poll ticker to fire.
+		time.Sleep(500 * time.Millisecond)
+		cancel()
+		<-done
 
-	if mock.idleCalled.Load() < 3 {
-		t.Errorf("idle called %d times, want >= 3", mock.idleCalled.Load())
-	}
-	if mock.noopCalled.Load() == 0 {
-		t.Error("expected noop calls after poll fallback")
-	}
+		if mock.idleCalled.Load() < 3 {
+			t.Errorf("idle called %d times, want >= 3", mock.idleCalled.Load())
+		}
+		if mock.noopCalled.Load() == 0 {
+			t.Error("expected noop calls after poll fallback")
+		}
+	})
 }
 
 func TestBackoffResetAfterSuccess(t *testing.T) {
-	repo := newTestRepo(t)
+	synctest.Test(t, func(t *testing.T) {
+		repo := newTestRepo(t)
 
-	inject := func(_ context.Context, _ []byte) error { return nil }
+		inject := func(_ context.Context, _ []byte) error { return nil }
 
-	sessionCount := 0
-	var mu sync.Mutex
-	var dialTimes []time.Time
-	w := &Worker{
-		cfg: config.IMAPConfig{
-			Folder:            "INBOX",
-			PollInterval:      config.Duration{Duration: 50 * time.Millisecond},
-			ReconnectDelay:    1, // 1s base
-			MaxReconnectDelay: 4, // 4s cap
-		},
-		peerEmail:  "from@test.com",
-		localEmail: "to@test.com",
-		repo:       repo,
-		inject:     inject,
-		logger:     testLogger(),
-	}
-	w.dial = func(ctx context.Context, _ func()) (Client, error) {
-		mu.Lock()
-		sessionCount++
-		n := sessionCount
-		dialTimes = append(dialTimes, time.Now())
-		mu.Unlock()
-		if n <= 2 {
-			return nil, fmt.Errorf("dial: connection refused")
+		sessionCount := 0
+		var mu sync.Mutex
+		var dialTimes []time.Time
+		w := &Worker{
+			cfg: config.IMAPConfig{
+				Folder:            "INBOX",
+				PollInterval:      config.Duration{Duration: 50 * time.Millisecond},
+				ReconnectDelay:    1, // 1s base
+				MaxReconnectDelay: 4, // 4s cap
+			},
+			peerEmail:  "from@test.com",
+			localEmail: "to@test.com",
+			repo:       repo,
+			inject:     inject,
+			logger:     testLogger(),
 		}
-		return &mockClient{
-			selectState: MailboxState{UIDValidity: 100},
-			hasIdle:     false,
-			noopErr:     errors.New("connection reset"),
-		}, nil
-	}
-
-	// With ReconnectDelay=1s, MaxReconnectDelay=4s:
-	//   session 1 (dial error): t=0, sleep 1s, backoff→2s
-	//   session 2 (dial error): t=1s, sleep 2s, backoff→4s
-	//   session 3 (success→noop err): t=3s, sleep 4s, backoff→1s (reset: non-dial)
-	//   session 4 (success→noop err): t=7s, sleep 1s, backoff stays 1s
-	//   session 5: t=8s
-	// We verify the reset by checking the gap between sessions 4 and 5 is ~1s.
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-
-	done := make(chan error, 1)
-	go func() {
-		done <- w.Run(ctx)
-	}()
-
-	deadline := time.After(14 * time.Second)
-	for {
-		mu.Lock()
-		n := sessionCount
-		mu.Unlock()
-		if n >= 5 {
-			break
-		}
-		select {
-		case <-deadline:
-			cancel()
+		w.dial = func(ctx context.Context, _ func()) (Client, error) {
 			mu.Lock()
-			t.Fatalf("timed out: only got %d sessions", sessionCount)
+			sessionCount++
+			n := sessionCount
+			dialTimes = append(dialTimes, time.Now())
 			mu.Unlock()
-		case <-time.After(100 * time.Millisecond):
+			if n <= 2 {
+				return nil, fmt.Errorf("dial: connection refused")
+			}
+			return &mockClient{
+				selectState: MailboxState{UIDValidity: 100},
+				hasIdle:     false,
+				noopErr:     errors.New("connection reset"),
+			}, nil
 		}
-	}
-	cancel()
-	<-done
 
-	mu.Lock()
-	defer mu.Unlock()
-	if len(dialTimes) >= 5 {
-		gap := dialTimes[4].Sub(dialTimes[3])
-		if gap > 3*time.Second {
-			t.Errorf("gap between session 4 and 5 = %v, want ~1s (backoff should reset after non-dial error)", gap)
+		// With ReconnectDelay=1s, MaxReconnectDelay=4s, virtual time advances:
+		//   session 1 (dial error): t=0, sleep 1s, backoff→2s
+		//   session 2 (dial error): t=1s, sleep 2s, backoff→4s
+		//   session 3 (success→noop err): t=3s, sleep 4s, backoff→1s (reset: non-dial)
+		//   session 4 (success→noop err): t=7s, sleep 1s, backoff stays 1s
+		//   session 5: t=8s
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+
+		done := make(chan error, 1)
+		go func() {
+			done <- w.Run(ctx)
+		}()
+
+		// Advance virtual time past all 5 sessions (~8s needed).
+		time.Sleep(15 * time.Second)
+		cancel()
+		<-done
+
+		mu.Lock()
+		defer mu.Unlock()
+		if len(dialTimes) >= 5 {
+			gap := dialTimes[4].Sub(dialTimes[3])
+			if gap > 3*time.Second {
+				t.Errorf("gap between session 4 and 5 = %v, want ~1s (backoff should reset after non-dial error)", gap)
+			}
 		}
-	}
+	})
 }
 
 func TestCleanupDeleteAfterProcess(t *testing.T) {
@@ -1246,68 +1239,54 @@ func TestIdleTimeoutRestart(t *testing.T) {
 }
 
 func TestMaxReconnectDelayIsCapped(t *testing.T) {
-	repo := newTestRepo(t)
-	inject := func(_ context.Context, _ []byte) error { return nil }
+	synctest.Test(t, func(t *testing.T) {
+		repo := newTestRepo(t)
+		inject := func(_ context.Context, _ []byte) error { return nil }
 
-	var mu sync.Mutex
-	var dialTimes []time.Time
+		var mu sync.Mutex
+		var dialTimes []time.Time
 
-	w := &Worker{
-		cfg: config.IMAPConfig{
-			Folder:            "INBOX",
-			PollInterval:      config.Duration{Duration: time.Hour},
-			ReconnectDelay:    1,
-			MaxReconnectDelay: 2, // cap at 2s
-		},
-		peerEmail:  "from@test.com",
-		localEmail: "to@test.com",
-		repo:       repo,
-		inject:     inject,
-		logger:     testLogger(),
-	}
-	w.dial = func(ctx context.Context, _ func()) (Client, error) {
-		mu.Lock()
-		dialTimes = append(dialTimes, time.Now())
-		mu.Unlock()
-		return nil, errors.New("connection refused")
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	done := make(chan error, 1)
-	go func() { done <- w.Run(ctx) }()
-
-	// Wait for at least 4 dial attempts (1s + 2s + 2s = 5s of delays before 4th dial).
-	deadline := time.After(9 * time.Second)
-	for {
-		mu.Lock()
-		n := len(dialTimes)
-		mu.Unlock()
-		if n >= 4 {
-			break
+		w := &Worker{
+			cfg: config.IMAPConfig{
+				Folder:            "INBOX",
+				PollInterval:      config.Duration{Duration: time.Hour},
+				ReconnectDelay:    1,
+				MaxReconnectDelay: 2, // cap at 2s
+			},
+			peerEmail:  "from@test.com",
+			localEmail: "to@test.com",
+			repo:       repo,
+			inject:     inject,
+			logger:     testLogger(),
 		}
-		select {
-		case <-deadline:
-			cancel()
+		w.dial = func(ctx context.Context, _ func()) (Client, error) {
 			mu.Lock()
-			t.Fatalf("only got %d dials within timeout", len(dialTimes))
+			dialTimes = append(dialTimes, time.Now())
 			mu.Unlock()
-		case <-time.After(100 * time.Millisecond):
+			return nil, errors.New("connection refused")
 		}
-	}
-	cancel()
-	<-done
 
-	mu.Lock()
-	defer mu.Unlock()
-	if len(dialTimes) >= 4 {
-		// Gap between 3rd and 4th dial should be ~2s (cap), not ~4s (uncapped doubling).
-		gap := dialTimes[3].Sub(dialTimes[2])
-		if gap > 4*time.Second {
-			t.Errorf("gap between dial 3 and 4 = %v, want <= 4s (cap at 2s)", gap)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		done := make(chan error, 1)
+		go func() { done <- w.Run(ctx) }()
+
+		// Advance virtual time past all 4 dials (~5s needed: 1s + 2s + 2s).
+		time.Sleep(10 * time.Second)
+		cancel()
+		<-done
+
+		mu.Lock()
+		defer mu.Unlock()
+		if len(dialTimes) >= 4 {
+			// Gap between 3rd and 4th dial should be ~2s (cap), not ~4s (uncapped doubling).
+			gap := dialTimes[3].Sub(dialTimes[2])
+			if gap > 4*time.Second {
+				t.Errorf("gap between dial 3 and 4 = %v, want <= 4s (cap at 2s)", gap)
+			}
 		}
-	}
+	})
 }
 
 func TestDecodeFailureAndInjectFailureInterleaved(t *testing.T) {
@@ -2550,147 +2529,148 @@ func TestCorruptedLegacyMessageBlocksCheckpoint(t *testing.T) {
 // TestOnlineBeforeCatchUp verifies that setOnline(true) is called before
 // fetchAndProcess, so inject() doesn't spin on ErrOffline during catch-up.
 func TestOnlineBeforeCatchUp(t *testing.T) {
-	repo := newTestRepo(t)
+	synctest.Test(t, func(t *testing.T) {
+		repo := newTestRepo(t)
 
-	raw := makeTestEnvelope(t, []byte("pkt"))
+		raw := makeTestEnvelope(t, []byte("pkt"))
 
-	var injectCalledWhileOnline atomic.Bool
-	var onlineAtInjectTime atomic.Bool
+		var injectCalledWhileOnline atomic.Bool
+		var onlineAtInjectTime atomic.Bool
 
-	w := &Worker{
-		cfg: config.IMAPConfig{
-			Folder:            "INBOX",
-			PollInterval:      config.Duration{Duration: time.Hour},
-			ReconnectDelay:    1,
-			MaxReconnectDelay: 1,
-		},
-		peerEmail:  "from@test.com",
-		localEmail: "to@test.com",
-		repo:       repo,
-		inject: func(_ context.Context, _ []byte) error {
-			injectCalledWhileOnline.Store(true)
-			onlineAtInjectTime.Store(true)
-			return nil
-		},
-		logger: testLogger(),
-		setOnline: func(online bool) {
-			// If inject was already called and online is being set to true,
-			// that means online came after inject — the bug.
-			if injectCalledWhileOnline.Load() && online {
-				onlineAtInjectTime.Store(false)
-			}
-		},
-	}
+		w := &Worker{
+			cfg: config.IMAPConfig{
+				Folder:            "INBOX",
+				PollInterval:      config.Duration{Duration: time.Hour},
+				ReconnectDelay:    1,
+				MaxReconnectDelay: 1,
+			},
+			peerEmail:  "from@test.com",
+			localEmail: "to@test.com",
+			repo:       repo,
+			inject: func(_ context.Context, _ []byte) error {
+				injectCalledWhileOnline.Store(true)
+				onlineAtInjectTime.Store(true)
+				return nil
+			},
+			logger: testLogger(),
+			setOnline: func(online bool) {
+				if injectCalledWhileOnline.Load() && online {
+					onlineAtInjectTime.Store(false)
+				}
+			},
+		}
 
-	mock := &mockClient{
-		selectState: MailboxState{UIDValidity: 100},
-		fetchMsgs:   []fetchMsg{{uid: 1, raw: raw}},
-		hasIdle:     false,
-		noopErr:     errors.New("end session"),
-	}
+		mock := &mockClient{
+			selectState: MailboxState{UIDValidity: 100},
+			fetchMsgs:   []fetchMsg{{uid: 1, raw: raw}},
+			hasIdle:     false,
+			noopErr:     errors.New("end session"),
+		}
 
-	w.dial = func(_ context.Context, _ func()) (Client, error) {
-		injectCalledWhileOnline.Store(false)
-		return mock, nil
-	}
+		w.dial = func(_ context.Context, _ func()) (Client, error) {
+			injectCalledWhileOnline.Store(false)
+			return mock, nil
+		}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
 
-	done := make(chan error, 1)
-	go func() { done <- w.Run(ctx) }()
+		done := make(chan error, 1)
+		go func() { done <- w.Run(ctx) }()
 
-	// Wait for session to run.
-	time.Sleep(500 * time.Millisecond)
-	cancel()
-	<-done
+		// Advance virtual time enough for the session to run and poll to trigger.
+		time.Sleep(500 * time.Millisecond)
+		cancel()
+		<-done
 
-	if !onlineAtInjectTime.Load() {
-		t.Error("inject was called before setOnline(true) — would deadlock in production")
-	}
+		if !onlineAtInjectTime.Load() {
+			t.Error("inject was called before setOnline(true) — would deadlock in production")
+		}
+	})
 }
 
 // TestOnlineSetBeforeFetchAndProcess verifies the ordering: setOnline(true) is
 // called between GetCheckpoint and fetchAndProcess, not after.
 func TestOnlineSetBeforeFetchAndProcess(t *testing.T) {
-	repo := newTestRepo(t)
+	synctest.Test(t, func(t *testing.T) {
+		repo := newTestRepo(t)
 
-	var events []string
-	var mu sync.Mutex
-	record := func(event string) {
+		var events []string
+		var mu sync.Mutex
+		record := func(event string) {
+			mu.Lock()
+			events = append(events, event)
+			mu.Unlock()
+		}
+
+		w := &Worker{
+			cfg: config.IMAPConfig{
+				Folder:            "INBOX",
+				PollInterval:      config.Duration{Duration: time.Hour},
+				ReconnectDelay:    1,
+				MaxReconnectDelay: 1,
+			},
+			peerEmail:  "from@test.com",
+			localEmail: "to@test.com",
+			repo:       repo,
+			inject: func(_ context.Context, _ []byte) error {
+				record("inject")
+				return nil
+			},
+			logger: testLogger(),
+			setOnline: func(online bool) {
+				if online {
+					record("online-true")
+				} else {
+					record("online-false")
+				}
+			},
+		}
+
+		raw := makeTestEnvelope(t, []byte("data"))
+		mock := &mockClient{
+			selectState: MailboxState{UIDValidity: 100},
+			fetchMsgs:   []fetchMsg{{uid: 1, raw: raw}},
+			hasIdle:     false,
+			noopErr:     errors.New("end session"),
+		}
+		w.dial = func(_ context.Context, _ func()) (Client, error) {
+			return mock, nil
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+
+		done := make(chan error, 1)
+		go func() { done <- w.Run(ctx) }()
+
+		time.Sleep(500 * time.Millisecond)
+		cancel()
+		<-done
+
 		mu.Lock()
-		events = append(events, event)
-		mu.Unlock()
-	}
+		defer mu.Unlock()
 
-	w := &Worker{
-		cfg: config.IMAPConfig{
-			Folder:            "INBOX",
-			PollInterval:      config.Duration{Duration: time.Hour},
-			ReconnectDelay:    1,
-			MaxReconnectDelay: 1,
-		},
-		peerEmail:  "from@test.com",
-		localEmail: "to@test.com",
-		repo:       repo,
-		inject: func(_ context.Context, _ []byte) error {
-			record("inject")
-			return nil
-		},
-		logger: testLogger(),
-		setOnline: func(online bool) {
-			if online {
-				record("online-true")
-			} else {
-				record("online-false")
+		onlineIdx := -1
+		injectIdx := -1
+		for i, e := range events {
+			if e == "online-true" && onlineIdx == -1 {
+				onlineIdx = i
 			}
-		},
-	}
-
-	raw := makeTestEnvelope(t, []byte("data"))
-	mock := &mockClient{
-		selectState: MailboxState{UIDValidity: 100},
-		fetchMsgs:   []fetchMsg{{uid: 1, raw: raw}},
-		hasIdle:     false,
-		noopErr:     errors.New("end session"),
-	}
-	w.dial = func(_ context.Context, _ func()) (Client, error) {
-		return mock, nil
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
-	done := make(chan error, 1)
-	go func() { done <- w.Run(ctx) }()
-
-	time.Sleep(500 * time.Millisecond)
-	cancel()
-	<-done
-
-	mu.Lock()
-	defer mu.Unlock()
-
-	// Find first online-true and first inject — online-true must come first.
-	onlineIdx := -1
-	injectIdx := -1
-	for i, e := range events {
-		if e == "online-true" && onlineIdx == -1 {
-			onlineIdx = i
+			if e == "inject" && injectIdx == -1 {
+				injectIdx = i
+			}
 		}
-		if e == "inject" && injectIdx == -1 {
-			injectIdx = i
+		if onlineIdx == -1 {
+			t.Fatal("setOnline(true) was never called")
 		}
-	}
-	if onlineIdx == -1 {
-		t.Fatal("setOnline(true) was never called")
-	}
-	if injectIdx == -1 {
-		t.Fatal("inject was never called")
-	}
-	if onlineIdx > injectIdx {
-		t.Errorf("setOnline(true) at index %d, inject at index %d — online must come before inject", onlineIdx, injectIdx)
-	}
+		if injectIdx == -1 {
+			t.Fatal("inject was never called")
+		}
+		if onlineIdx > injectIdx {
+			t.Errorf("setOnline(true) at index %d, inject at index %d — online must come before inject", onlineIdx, injectIdx)
+		}
+	})
 }
 
 func TestFetchAndProcess_NetworkErrorSuppressesCheckpoint(t *testing.T) {
@@ -2819,47 +2799,43 @@ func (c *blockingClient) Close() error {
 }
 
 func TestRunSession_ShutdownUnblocksViaClose(t *testing.T) {
-	repo := newTestRepo(t)
-	inject := func(_ context.Context, _ []byte) error { return nil }
+	synctest.Test(t, func(t *testing.T) {
+		repo := newTestRepo(t)
+		inject := func(_ context.Context, _ []byte) error { return nil }
 
-	bc := &blockingClient{
-		selectState: MailboxState{UIDValidity: 100},
-		blockCh:     make(chan struct{}),
-	}
+		bc := &blockingClient{
+			selectState: MailboxState{UIDValidity: 100},
+			blockCh:     make(chan struct{}),
+		}
 
-	w := &Worker{
-		cfg: config.IMAPConfig{
-			Folder:            "INBOX",
-			PollInterval:      config.Duration{Duration: time.Hour},
-			ReconnectDelay:    1,
-			MaxReconnectDelay: 1,
-		},
-		peerEmail:  "from@test.com",
-		localEmail: "to@test.com",
-		repo:       repo,
-		inject:     inject,
-		logger:     testLogger(),
-	}
-	w.dial = func(ctx context.Context, _ func()) (Client, error) {
-		return bc, nil
-	}
+		w := &Worker{
+			cfg: config.IMAPConfig{
+				Folder:            "INBOX",
+				PollInterval:      config.Duration{Duration: time.Hour},
+				ReconnectDelay:    1,
+				MaxReconnectDelay: 1,
+			},
+			peerEmail:  "from@test.com",
+			localEmail: "to@test.com",
+			repo:       repo,
+			inject:     inject,
+			logger:     testLogger(),
+		}
+		w.dial = func(ctx context.Context, _ func()) (Client, error) {
+			return bc, nil
+		}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() {
-		done <- w.runSession(ctx)
-	}()
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		go func() {
+			done <- w.runSession(ctx)
+		}()
 
-	// Give runSession time to reach FetchSince.
-	time.Sleep(100 * time.Millisecond)
-	cancel()
-
-	select {
-	case <-done:
-		// runSession returned promptly — force-close goroutine unblocked FetchSince.
-	case <-time.After(3 * time.Second):
-		t.Fatal("runSession did not return within 3s after context cancellation — force-close failed to unblock FetchSince")
-	}
+		// Let runSession reach FetchSince (blocks on blockCh).
+		time.Sleep(100 * time.Millisecond)
+		cancel()
+		<-done
+	})
 }
 
 func TestFetchAndProcessOversizedNonTransport(t *testing.T) {
@@ -2954,6 +2930,166 @@ func TestCanonicalAddrNoAtSign(t *testing.T) {
 	result := canonicalAddr("nope")
 	if result != "nope" {
 		t.Errorf("canonicalAddr(%q) = %q, want %q", "nope", result, "nope")
+	}
+}
+
+// failingGetRepo wraps a real repo but makes GetCheckpoint return an error.
+type failingGetRepo struct {
+	inbox.Repository
+}
+
+func (f *failingGetRepo) GetCheckpoint(context.Context, string, uint32) (uint32, error) {
+	return 0, errors.New("get checkpoint: storage unavailable")
+}
+
+func TestRunSession_GetCheckpointError(t *testing.T) {
+	realRepo := newTestRepo(t)
+	repo := &failingGetRepo{Repository: realRepo}
+
+	inject := func(_ context.Context, _ []byte) error { return nil }
+
+	w := &Worker{
+		cfg: config.IMAPConfig{
+			Folder:            "INBOX",
+			PollInterval:      config.Duration{Duration: time.Hour},
+			ReconnectDelay:    1,
+			MaxReconnectDelay: 1,
+		},
+		repo:   repo,
+		inject: inject,
+		logger: testLogger(),
+	}
+	w.dial = func(_ context.Context, _ func()) (Client, error) {
+		return &mockClient{
+			selectState: MailboxState{UIDValidity: 100},
+			hasIdle:     false,
+		}, nil
+	}
+
+	err := w.runSession(context.Background())
+	if err == nil {
+		t.Fatal("expected error from GetCheckpoint failure")
+	}
+	if !strings.Contains(err.Error(), "get checkpoint") {
+		t.Errorf("error = %q, want substring 'get checkpoint'", err.Error())
+	}
+}
+
+func TestPollLoop_NoopError(t *testing.T) {
+	repo := newTestRepo(t)
+
+	inject := func(_ context.Context, _ []byte) error { return nil }
+
+	mock := &mockClient{
+		selectState: MailboxState{UIDValidity: 100},
+		hasIdle:     false,
+		noopErr:     errors.New("noop: connection reset"),
+	}
+
+	w := &Worker{
+		cfg: config.IMAPConfig{
+			Folder:       "INBOX",
+			PollInterval: config.Duration{Duration: 1 * time.Millisecond},
+		},
+		peerEmail:  "from@test.com",
+		localEmail: "to@test.com",
+		repo:       repo,
+		inject:     inject,
+		logger:     testLogger(),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	err := w.pollLoop(ctx, mock, 0, "INBOX", 100)
+	if err == nil {
+		t.Fatal("expected error from Noop failure")
+	}
+	if !strings.Contains(err.Error(), "noop") {
+		t.Errorf("error = %q, want substring 'noop'", err.Error())
+	}
+}
+
+func TestIdleLoop_FetchErrorAfterExists(t *testing.T) {
+	repo := newTestRepo(t)
+	inject := func(_ context.Context, _ []byte) error { return nil }
+
+	idleCh := make(chan struct{})
+	existsCh := make(chan struct{}, 1)
+
+	mock := &mockClient{
+		selectState: MailboxState{UIDValidity: 100},
+		hasIdle:     true,
+		idleCh:      idleCh,
+		fetchErr:    errors.New("network error during post-idle fetch"),
+	}
+
+	w := &Worker{
+		cfg:        config.IMAPConfig{Folder: "INBOX"},
+		peerEmail:  "from@test.com",
+		localEmail: "to@test.com",
+		repo:       repo,
+		inject:     inject,
+		logger:     testLogger(),
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- w.idleLoop(ctx, mock, 0, "INBOX", 100, existsCh)
+	}()
+
+	// Trigger EXISTS notification, then let idle complete.
+	existsCh <- struct{}{}
+	close(idleCh)
+
+	err := <-done
+	if err == nil {
+		t.Fatal("expected error from fetch after idle")
+	}
+	if !strings.Contains(err.Error(), "fetch after idle") {
+		t.Errorf("error = %q, want substring 'fetch after idle'", err.Error())
+	}
+}
+
+func TestFetchAndProcess_DecodeFailBelowProcessed(t *testing.T) {
+	// UIDs: 3 (decode fail), 5 (OK). Ceiling = 3 (decode fail).
+	// UID 5 is above ceiling → safe = 0 (no UID below ceiling succeeded).
+	// This is distinct from TestDecodeFailureCapsCheckpoint which has
+	// [5(ok), 6(corrupt), 7(ok)] → safe = 5.
+	repo := newTestRepo(t)
+
+	inject := func(_ context.Context, _ []byte) error { return nil }
+
+	corruptWithMarker := []byte("X-RNS-Transport: 1\r\n\r\n\x00corrupt")
+	raw5 := makeTestEnvelope(t, []byte("pkt5"))
+
+	mock := &mockClient{
+		selectState: MailboxState{UIDValidity: 100},
+		fetchMsgs: []fetchMsg{
+			{uid: 3, raw: corruptWithMarker},
+			{uid: 5, raw: raw5},
+		},
+	}
+
+	w := &Worker{
+		cfg:        config.IMAPConfig{Folder: "INBOX"},
+		peerEmail:  "from@test.com",
+		localEmail: "to@test.com",
+		repo:       repo,
+		inject:     inject,
+		logger:     testLogger(),
+	}
+
+	lastUID, err := w.fetchAndProcess(context.Background(), mock, 0, "INBOX", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Decode fail at UID 3, processed UID 5 is above ceiling → safe = 0.
+	if lastUID != 0 {
+		t.Errorf("lastUID = %d, want 0 (decode fail at UID 3 blocks all advancement)", lastUID)
 	}
 }
 
