@@ -11,6 +11,7 @@ import (
 	goimap "github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-imap/v2/imapclient"
 
+	"github.com/x3ps/rns-iface-email/internal/envelope"
 	"github.com/x3ps/rns-iface-email/internal/transport"
 )
 
@@ -18,6 +19,23 @@ const (
 	imapDialTimeout = 30 * time.Second
 	imapIOTimeout   = 60 * time.Second
 	imapIdleTimeout = 30 * time.Minute
+
+	// maxHeaderSize is the budget for RFC 5322 headers in the fetch
+	// literal reader. Both peers use our Encode(), which produces ~400
+	// bytes of headers with transport markers placed early. 16 KiB
+	// accommodates all realistic cases including MTA-added headers.
+	//
+	// For messages with pathologically long headers (>16 KiB),
+	// mail.ReadMessage() on truncated input may fail, but
+	// hasTransportMarker() fallback scans the available bytes for
+	// X-RNS-Transport/Subject markers — correct classification.
+	maxHeaderSize = 16 << 10
+
+	// maxFetchLiteralSize caps bytes buffered per message in FetchSince.
+	// Composed from explicit header and body budgets so that Decode()
+	// can always run its full two-phase classification on the input.
+	// The +1 ensures Decode() can detect body-exceeds-limit.
+	maxFetchLiteralSize = maxHeaderSize + envelope.MaxBodySize + 1
 )
 
 // errNoUIDPlus is returned by DeleteUIDs when the server lacks the UIDPLUS
@@ -107,6 +125,23 @@ func (r *realClient) Select(mailbox string) (MailboxState, error) {
 	}, nil
 }
 
+// readLiteral reads from r up to limit bytes. If the source exceeds limit,
+// the remainder is drained to keep the IMAP protocol in sync and oversized
+// is set to true. The returned buf is at most limit bytes.
+func readLiteral(r io.Reader, limit int) (buf []byte, oversized bool, err error) {
+	limited := io.LimitReader(r, int64(limit)+1)
+	buf, err = io.ReadAll(limited)
+	if err != nil {
+		return nil, false, err
+	}
+	if len(buf) > limit {
+		_, _ = io.Copy(io.Discard, r) // drain excess
+		buf = buf[:limit]
+		return buf, true, nil
+	}
+	return buf, false, nil
+}
+
 func (r *realClient) FetchSince(lastUID uint32, handler func(uid uint32, raw []byte) error) (retErr error) {
 	// UID FETCH lastUID+1:* (UID BODY.PEEK[])
 	uidSet := goimap.UIDSet{goimap.UIDRange{
@@ -131,47 +166,75 @@ func (r *realClient) FetchSince(lastUID uint32, handler func(uid uint32, raw []b
 		if msg == nil {
 			break
 		}
-		buf, err := msg.Collect()
-		if err != nil {
-			return fmt.Errorf("fetch collect: %w", err)
+
+		var uid goimap.UID
+		var raw []byte
+		for {
+			item := msg.Next()
+			if item == nil {
+				break
+			}
+			switch v := item.(type) {
+			case imapclient.FetchItemDataUID:
+				uid = v.UID
+			case imapclient.FetchItemDataBodySection:
+				if v.Literal == nil {
+					continue
+				}
+				var err error
+				raw, _, err = readLiteral(v.Literal, maxFetchLiteralSize)
+				if err != nil {
+					return fmt.Errorf("fetch read body: %w", err)
+				}
+			}
 		}
-		if uint32(buf.UID) <= lastUID {
+
+		if uint32(uid) <= lastUID {
 			// Server returned UID <= lastUID (can happen with UID FETCH *).
 			continue
-		}
-		var raw []byte
-		for _, bs := range buf.BodySection {
-			raw = bs.Bytes
-			break
 		}
 		if raw == nil {
 			continue
 		}
-		if err := handler(uint32(buf.UID), raw); err != nil {
+		if err := handler(uint32(uid), raw); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
+// idleWait races ctx.Done() against waitCh. If waitCh fires first
+// (server disconnect/BYE), returns its error without calling closeFn.
+// If ctx.Done() fires first, calls closeFn then drains waitCh.
+func idleWait(ctx context.Context, waitCh <-chan error, closeFn func() error) error {
+	select {
+	case err := <-waitCh:
+		return err
+	case <-ctx.Done():
+		if err := closeFn(); err != nil {
+			<-waitCh
+			return fmt.Errorf("idle close: %w", err)
+		}
+		return <-waitCh
+	}
+}
+
 func (r *realClient) Idle(ctx context.Context) error {
-	// Extend timeout for IDLE: server may not send anything for minutes.
-	// Per RFC 2177, IDLE should be maintained up to 29 minutes.
 	r.tc.SetTimeout(imapIdleTimeout)
-	defer r.tc.SetTimeout(imapIOTimeout) // safety net for early returns; also set explicitly before Close/Wait
+	defer r.tc.SetTimeout(imapIOTimeout)
 
 	idleCmd, err := r.c.Idle()
 	if err != nil {
 		return fmt.Errorf("idle start: %w", err)
 	}
 
-	<-ctx.Done()
+	waitCh := make(chan error, 1)
+	go func() { waitCh <- idleCmd.Wait() }()
 
-	r.tc.SetTimeout(imapIOTimeout)
-	if err := idleCmd.Close(); err != nil {
-		return fmt.Errorf("idle close: %w", err)
-	}
-	return idleCmd.Wait()
+	return idleWait(ctx, waitCh, func() error {
+		r.tc.SetTimeout(imapIOTimeout)
+		return idleCmd.Close()
+	})
 }
 
 func (r *realClient) HasIdle() bool {

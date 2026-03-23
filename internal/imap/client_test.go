@@ -1,10 +1,16 @@
 package imap
 
 import (
+	"bytes"
+	"context"
 	"errors"
+	"io"
 	"testing"
+	"time"
 
 	goimap "github.com/emersion/go-imap/v2"
+
+	"github.com/x3ps/rns-iface-email/internal/envelope"
 )
 
 func TestHasUIDPlusWithExplicitCap(t *testing.T) {
@@ -150,5 +156,146 @@ func TestRequireUIDPlusGate(t *testing.T) {
 	caps2[goimap.CapIMAP4rev2] = struct{}{}
 	if err := requireUIDPlus(caps2); err != nil {
 		t.Errorf("unexpected error with IMAP4rev2: %v", err)
+	}
+}
+
+func TestIdleWaitServerDisconnect(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	waitCh := make(chan error, 1)
+	waitErr := errors.New("server BYE")
+	waitCh <- waitErr
+
+	closeCalled := false
+	closeFn := func() error {
+		closeCalled = true
+		return nil
+	}
+
+	err := idleWait(ctx, waitCh, closeFn)
+	if !errors.Is(err, waitErr) {
+		t.Errorf("got %v, want %v", err, waitErr)
+	}
+	if closeCalled {
+		t.Error("closeFn should not be called when waitCh fires first")
+	}
+}
+
+func TestIdleWaitContextDone(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	waitCh := make(chan error, 1)
+	closeFn := func() error {
+		return nil
+	}
+
+	// Cancel context, then provide waitCh result.
+	cancel()
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		waitCh <- nil
+	}()
+
+	err := idleWait(ctx, waitCh, closeFn)
+	if err != nil {
+		t.Errorf("expected nil, got %v", err)
+	}
+}
+
+func TestIdleWaitContextDoneCloseError(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	waitCh := make(chan error, 1)
+	closeErr := errors.New("close failed")
+	closeFn := func() error {
+		return closeErr
+	}
+
+	cancel()
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		waitCh <- nil
+	}()
+
+	err := idleWait(ctx, waitCh, closeFn)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !errors.Is(err, closeErr) {
+		t.Errorf("expected wrapped close error, got: %v", err)
+	}
+}
+
+func TestReadLiteralWithinLimit(t *testing.T) {
+	data := bytes.Repeat([]byte("x"), 100)
+	buf, oversized, err := readLiteral(bytes.NewReader(data), 200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if oversized {
+		t.Error("expected oversized=false")
+	}
+	if len(buf) != 100 {
+		t.Errorf("len(buf) = %d, want 100", len(buf))
+	}
+}
+
+func TestReadLiteralExceedsLimit(t *testing.T) {
+	limit := 1 << 20 // 1 MiB
+	data := bytes.Repeat([]byte("x"), 10*1024*1024) // 10 MB
+	r := &countingReader{r: bytes.NewReader(data)}
+	buf, oversized, err := readLiteral(r, limit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !oversized {
+		t.Error("expected oversized=true")
+	}
+	if len(buf) != limit {
+		t.Errorf("len(buf) = %d, want %d", len(buf), limit)
+	}
+	// Source should be fully drained.
+	if r.n != int64(len(data)) {
+		t.Errorf("source bytes consumed = %d, want %d (fully drained)", r.n, len(data))
+	}
+}
+
+func TestReadLiteralDrainsExcess(t *testing.T) {
+	data := bytes.Repeat([]byte("A"), 5000)
+	r := &countingReader{r: bytes.NewReader(data)}
+	_, _, err := readLiteral(r, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.n != int64(len(data)) {
+		t.Errorf("total bytes consumed = %d, want %d", r.n, len(data))
+	}
+}
+
+// countingReader wraps an io.Reader and counts total bytes read.
+type countingReader struct {
+	r io.Reader
+	n int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	return n, err
+}
+
+func TestMaxFetchLiteralSizeCoversMaxPacket(t *testing.T) {
+	pkt := bytes.Repeat([]byte("P"), envelope.MaxPacketSize)
+	raw, _, err := envelope.Encode(envelope.Params{
+		From:   "a@b.com",
+		To:     "c@d.com",
+		Packet: pkt,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(raw) > maxFetchLiteralSize {
+		t.Errorf("Encode() produced %d bytes, exceeds maxFetchLiteralSize=%d", len(raw), maxFetchLiteralSize)
 	}
 }

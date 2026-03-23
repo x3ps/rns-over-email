@@ -2861,3 +2861,90 @@ func TestRunSession_ShutdownUnblocksViaClose(t *testing.T) {
 		t.Fatal("runSession did not return within 3s after context cancellation — force-close failed to unblock FetchSince")
 	}
 }
+
+func TestFetchAndProcessOversizedNonTransport(t *testing.T) {
+	repo := newTestRepo(t)
+
+	var injected int
+	inject := func(_ context.Context, _ []byte) error {
+		injected++
+		return nil
+	}
+
+	// Build a large non-transport message (no transport markers).
+	bigBody := bytes.Repeat([]byte("X"), 2*1024*1024)
+	raw := append([]byte("From: someone@example.com\r\nTo: other@example.com\r\nSubject: Hello\r\nContent-Type: text/plain\r\n\r\n"), bigBody...)
+
+	mock := &mockClient{
+		selectState: MailboxState{UIDValidity: 100},
+		fetchMsgs:   []fetchMsg{{uid: 10, raw: raw}},
+	}
+
+	w := &Worker{
+		cfg:        config.IMAPConfig{Folder: "INBOX"},
+		peerEmail:  "from@test.com",
+		localEmail: "to@test.com",
+		repo:       repo,
+		inject:     inject,
+		logger:     testLogger(),
+	}
+
+	ctx := context.Background()
+	lastUID, err := w.fetchAndProcess(ctx, mock, 0, "INBOX", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Non-transport should be skipped; checkpoint advances past it.
+	if lastUID != 10 {
+		t.Errorf("lastUID = %d, want 10 (skipped non-transport)", lastUID)
+	}
+	if injected != 0 {
+		t.Errorf("injected = %d, want 0", injected)
+	}
+}
+
+func TestFetchAndProcessOversizedTransport(t *testing.T) {
+	repo := newTestRepo(t)
+
+	var injected int
+	inject := func(_ context.Context, _ []byte) error {
+		injected++
+		return nil
+	}
+
+	// Build a message with transport headers but body exceeding MaxBodySize.
+	bigBody := bytes.Repeat([]byte("A"), envelope.MaxBodySize+100)
+	raw := append([]byte(
+		"From: from@test.com\r\nTo: to@test.com\r\n"+
+			"Subject: RNS Transport Packet\r\n"+
+			"X-RNS-Transport: 1\r\n"+
+			"Content-Type: application/octet-stream\r\n\r\n"), bigBody...)
+
+	mock := &mockClient{
+		selectState: MailboxState{UIDValidity: 100},
+		fetchMsgs:   []fetchMsg{{uid: 20, raw: raw}},
+	}
+
+	w := &Worker{
+		cfg:        config.IMAPConfig{Folder: "INBOX"},
+		peerEmail:  "from@test.com",
+		localEmail: "to@test.com",
+		repo:       repo,
+		inject:     inject,
+		logger:     testLogger(),
+	}
+
+	ctx := context.Background()
+	lastUID, err := w.fetchAndProcess(ctx, mock, 0, "INBOX", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Transport message with decode error is NOT ErrNotTransport,
+	// so checkpoint should be blocked at this UID.
+	if lastUID != 0 {
+		t.Errorf("lastUID = %d, want 0 (checkpoint blocked at decode-failed transport UID)", lastUID)
+	}
+	if injected != 0 {
+		t.Errorf("injected = %d, want 0", injected)
+	}
+}
