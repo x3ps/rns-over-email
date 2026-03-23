@@ -11,12 +11,15 @@ import (
 	"time"
 
 	"github.com/x3ps/rns-iface-email/internal/envelope"
+	"github.com/x3ps/rns-iface-email/internal/transport"
 )
 
 type mockSender struct {
 	mu       sync.Mutex
 	calls    []sendCall
 	failNext int // number of times to fail before succeeding
+	sendErr  error // if non-nil, always return this error (overrides failNext)
+	sendCnt  atomic.Int32
 	probeErr error
 	probeMu  sync.Mutex
 	probeCnt atomic.Int32
@@ -28,8 +31,12 @@ type sendCall struct {
 }
 
 func (m *mockSender) Send(_ context.Context, to string, msg []byte) error {
+	m.sendCnt.Add(1)
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.sendErr != nil {
+		return m.sendErr
+	}
 	if m.failNext > 0 {
 		m.failNext--
 		return errors.New("transient SMTP error")
@@ -615,5 +622,74 @@ func TestHandlePacketEnvelopeEncodeError(t *testing.T) {
 	defer sender.mu.Unlock()
 	if len(sender.calls) != 0 {
 		t.Errorf("expected 0 sends after encode error, got %d", len(sender.calls))
+	}
+}
+
+func TestHandlePacketNoRetryOnDataOutcomeUnknown(t *testing.T) {
+	t.Parallel()
+	sender := &mockSender{
+		sendErr: &transport.ErrDataOutcomeUnknown{Err: errors.New("smtp data close: EOF")},
+	}
+
+	var mu sync.Mutex
+	var onlineCalls []bool
+	setOnline := func(online bool) {
+		mu.Lock()
+		onlineCalls = append(onlineCalls, online)
+		mu.Unlock()
+	}
+
+	h := NewHandler(sender, testLogger(), "peer@test.com", "from@test.com",
+		setOnline, 10*time.Millisecond, 100*time.Millisecond)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	err := h.HandlePacket(ctx, []byte("ambiguous-pkt"))
+	if err != nil {
+		t.Fatalf("expected nil return, got %v", err)
+	}
+
+	// Exactly 1 Send call — no retry.
+	if cnt := sender.sendCnt.Load(); cnt != 1 {
+		t.Errorf("Send called %d times, want 1 (no retry on ambiguous outcome)", cnt)
+	}
+
+	// Recovery should have been triggered (setOnline(false)).
+	deadline := time.After(2 * time.Second)
+	for {
+		mu.Lock()
+		hasFalse := len(onlineCalls) > 0 && !onlineCalls[0]
+		mu.Unlock()
+		if hasFalse {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for setOnline(false) — recovery not triggered")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
+func TestHandlePacketRetriesOnSMTPReject(t *testing.T) {
+	t.Parallel()
+	// failNext=2 means first 2 calls fail with a regular error, 3rd succeeds.
+	sender := &mockSender{failNext: 2}
+	h := NewHandler(sender, testLogger(), "peer@test.com", "from@test.com", nil, 0, 0)
+
+	err := h.HandlePacket(context.Background(), []byte("retry-pkt"))
+	if err != nil {
+		t.Fatalf("expected nil, got %v", err)
+	}
+
+	// Should have retried and eventually succeeded.
+	if cnt := sender.sendCnt.Load(); cnt != 3 {
+		t.Errorf("Send called %d times, want 3 (2 failures + 1 success)", cnt)
+	}
+	sender.mu.Lock()
+	defer sender.mu.Unlock()
+	if len(sender.calls) != 1 {
+		t.Errorf("expected 1 successful send, got %d", len(sender.calls))
 	}
 }

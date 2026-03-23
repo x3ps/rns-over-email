@@ -3,6 +3,7 @@ package transport
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -10,6 +11,15 @@ import (
 	"github.com/emersion/go-sasl"
 	"github.com/emersion/go-smtp"
 )
+
+// ErrDataOutcomeUnknown wraps non-deterministic errors that occur after
+// the SMTP DATA dot-terminator has been sent. The server may or may not
+// have accepted the message. Callers must not retry to preserve
+// at-most-once semantics.
+type ErrDataOutcomeUnknown struct{ Err error }
+
+func (e *ErrDataOutcomeUnknown) Error() string { return e.Err.Error() }
+func (e *ErrDataOutcomeUnknown) Unwrap() error { return e.Err }
 
 const (
 	smtpDialTimeout = 30 * time.Second
@@ -115,7 +125,18 @@ func (s *SMTPSender) Send(ctx context.Context, to string, msg []byte) error {
 		return fmt.Errorf("smtp write: %w", err)
 	}
 	if err := wc.Close(); err != nil {
-		return fmt.Errorf("smtp data close: %w", err)
+		closeErr := fmt.Errorf("smtp data close: %w", err)
+		// Classify: go-smtp's CloseWithResponse() returns *smtp.SMTPError
+		// when the server explicitly responds with 4xx/5xx. It returns a
+		// raw net/io error on timeout, EOF, or connection reset.
+		var smtpErr *smtp.SMTPError
+		if errors.As(err, &smtpErr) {
+			// Deterministic rejection — safe to retry.
+			return closeErr
+		}
+		// Non-SMTP error: dot-terminator was sent, but we never received
+		// the server's final response. Outcome unknown.
+		return &ErrDataOutcomeUnknown{Err: closeErr}
 	}
 
 	_ = c.Quit() // best-effort; message already committed by DATA

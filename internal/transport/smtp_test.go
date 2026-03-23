@@ -3,6 +3,7 @@ package transport
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -746,5 +747,155 @@ func TestSMTPSendRespectsContextDeadline(t *testing.T) {
 	}
 	if elapsed > 2*time.Second {
 		t.Errorf("Send took %v, expected prompt return near 500ms deadline", elapsed)
+	}
+}
+
+func TestSMTPSendDataCloseTimeoutReturnsOutcomeUnknown(t *testing.T) {
+	// Raw SMTP server: accepts AUTH/MAIL/RCPT/DATA, reads body+dot,
+	// then closes connection without sending 250.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		write := func(s string) { _, _ = conn.Write([]byte(s + "\r\n")) }
+		buf := make([]byte, 4096)
+		readline := func() string {
+			var line []byte
+			for {
+				n, _ := conn.Read(buf[:1])
+				if n == 0 {
+					break
+				}
+				line = append(line, buf[0])
+				if len(line) >= 2 && line[len(line)-2] == '\r' && line[len(line)-1] == '\n' {
+					return strings.TrimRight(string(line), "\r\n")
+				}
+			}
+			return string(line)
+		}
+
+		write("220 localhost ESMTP test")
+		readline() // EHLO
+		write("250-localhost")
+		write("250 AUTH PLAIN")
+		readline() // AUTH PLAIN
+		write("235 ok")
+		readline() // MAIL FROM
+		write("250 ok")
+		readline() // RCPT TO
+		write("250 ok")
+		readline() // DATA
+		write("354 go ahead")
+		for {
+			l := readline()
+			if l == "." {
+				break
+			}
+		}
+		// Close without 250 — simulates timeout/network drop after dot.
+	}()
+
+	host, port := splitHostPort(t, ln.Addr().String())
+	sender := &SMTPSender{
+		Host:     host,
+		Port:     port,
+		Username: "testuser",
+		Password: "testpass",
+		From:     "sender@test.com",
+		TLSMode:  "none",
+		Logger:   slog.New(slog.NewTextHandler(os.Stderr, nil)),
+	}
+
+	err = sender.Send(context.Background(), "receiver@test.com", []byte("Subject: test\r\n\r\nTimeout test"))
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	var unknown *ErrDataOutcomeUnknown
+	if !errors.As(err, &unknown) {
+		t.Errorf("expected ErrDataOutcomeUnknown, got %T: %v", err, err)
+	}
+}
+
+func TestSMTPSendDataRejectReturnsRegularError(t *testing.T) {
+	// Raw SMTP server: accepts through DATA, reads body+dot, sends 552.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		write := func(s string) { _, _ = conn.Write([]byte(s + "\r\n")) }
+		buf := make([]byte, 4096)
+		readline := func() string {
+			var line []byte
+			for {
+				n, _ := conn.Read(buf[:1])
+				if n == 0 {
+					break
+				}
+				line = append(line, buf[0])
+				if len(line) >= 2 && line[len(line)-2] == '\r' && line[len(line)-1] == '\n' {
+					return strings.TrimRight(string(line), "\r\n")
+				}
+			}
+			return string(line)
+		}
+
+		write("220 localhost ESMTP test")
+		readline() // EHLO
+		write("250-localhost")
+		write("250 AUTH PLAIN")
+		readline() // AUTH PLAIN
+		write("235 ok")
+		readline() // MAIL FROM
+		write("250 ok")
+		readline() // RCPT TO
+		write("250 ok")
+		readline() // DATA
+		write("354 go ahead")
+		for {
+			l := readline()
+			if l == "." {
+				break
+			}
+		}
+		write("552 message too large")
+	}()
+
+	host, port := splitHostPort(t, ln.Addr().String())
+	sender := &SMTPSender{
+		Host:     host,
+		Port:     port,
+		Username: "testuser",
+		Password: "testpass",
+		From:     "sender@test.com",
+		TLSMode:  "none",
+		Logger:   slog.New(slog.NewTextHandler(os.Stderr, nil)),
+	}
+
+	err = sender.Send(context.Background(), "receiver@test.com", []byte("Subject: test\r\n\r\nReject test"))
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	var unknown *ErrDataOutcomeUnknown
+	if errors.As(err, &unknown) {
+		t.Errorf("expected regular error (not ErrDataOutcomeUnknown) for deterministic 552 rejection, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "smtp data close") {
+		t.Errorf("expected 'smtp data close' in error, got: %v", err)
 	}
 }

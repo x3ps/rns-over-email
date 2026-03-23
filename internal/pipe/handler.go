@@ -2,6 +2,7 @@ package pipe
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"sync/atomic"
 	"time"
@@ -64,6 +65,13 @@ func (h *Handler) HandlePacket(ctx context.Context, pkt []byte) error {
 	backoff := time.Second
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		if err := h.sender.Send(sendCtx, h.email, envBytes); err != nil {
+			var unknown *transport.ErrDataOutcomeUnknown
+			if errors.As(err, &unknown) {
+				h.logger.Error("packet delivery ambiguous: DATA sent but response unclear; not retrying",
+					"message_id", messageID, "error", err)
+				h.beginRecovery(ctx)
+				return nil
+			}
 			lastErr = err
 			h.logger.Warn("send failed",
 				"message_id", messageID,
