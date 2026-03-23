@@ -2692,3 +2692,172 @@ func TestOnlineSetBeforeFetchAndProcess(t *testing.T) {
 		t.Errorf("setOnline(true) at index %d, inject at index %d — online must come before inject", onlineIdx, injectIdx)
 	}
 }
+
+func TestFetchAndProcess_NetworkErrorSuppressesCheckpoint(t *testing.T) {
+	// FetchSince delivers UIDs [5, 10] then returns a network error.
+	// Because the error is not from the handler (failedUID == 0),
+	// checkpoint must stay at lastUID — no advancement.
+	repo := newTestRepo(t)
+
+	inject := func(_ context.Context, _ []byte) error { return nil }
+
+	raw5 := makeTestEnvelope(t, []byte("pkt5"))
+	raw10 := makeTestEnvelope(t, []byte("pkt10"))
+
+	mock := &mockClient{
+		selectState: MailboxState{UIDValidity: 100},
+		fetchMsgs: []fetchMsg{
+			{uid: 5, raw: raw5},
+			{uid: 10, raw: raw10},
+		},
+		fetchErr: errors.New("network error: connection reset"),
+	}
+
+	w := &Worker{
+		cfg:        config.IMAPConfig{Folder: "INBOX"},
+		peerEmail:  "from@test.com",
+		localEmail: "to@test.com",
+		repo:       repo,
+		inject:     inject,
+		logger:     testLogger(),
+	}
+
+	lastUID, err := w.fetchAndProcess(context.Background(), mock, 0, "INBOX", 100)
+	if err == nil {
+		t.Fatal("expected error from FetchSince, got nil")
+	}
+	if lastUID != 0 {
+		t.Errorf("lastUID = %d, want 0 (should NOT advance on incomplete fetch)", lastUID)
+	}
+
+	cp, cpErr := repo.GetCheckpoint(context.Background(), "INBOX", 100)
+	if cpErr != nil {
+		t.Fatal(cpErr)
+	}
+	if cp != 0 {
+		t.Errorf("checkpoint = %d, want 0 (network error should suppress advancement)", cp)
+	}
+}
+
+func TestFetchAndProcess_CmdCloseErrorSuppressesCheckpoint(t *testing.T) {
+	// All UIDs delivered successfully (handler returns nil), but FetchSince
+	// itself returns an error (simulating cmd.Close() error after iteration).
+	// Because failedUID == 0, checkpoint must stay at lastUID.
+	repo := newTestRepo(t)
+
+	inject := func(_ context.Context, _ []byte) error { return nil }
+
+	raw := makeTestEnvelope(t, []byte("pkt1"))
+	mock := &mockClient{
+		selectState: MailboxState{UIDValidity: 100},
+		fetchMsgs:   []fetchMsg{{uid: 5, raw: raw}},
+		fetchErr:    errors.New("cmd.Close: unexpected server response"),
+	}
+
+	w := &Worker{
+		cfg:        config.IMAPConfig{Folder: "INBOX"},
+		peerEmail:  "from@test.com",
+		localEmail: "to@test.com",
+		repo:       repo,
+		inject:     inject,
+		logger:     testLogger(),
+	}
+
+	lastUID, err := w.fetchAndProcess(context.Background(), mock, 0, "INBOX", 100)
+	if err == nil {
+		t.Fatal("expected error from FetchSince, got nil")
+	}
+	if lastUID != 0 {
+		t.Errorf("lastUID = %d, want 0 (should NOT advance on cmd.Close error)", lastUID)
+	}
+
+	cp, cpErr := repo.GetCheckpoint(context.Background(), "INBOX", 100)
+	if cpErr != nil {
+		t.Fatal(cpErr)
+	}
+	if cp != 0 {
+		t.Errorf("checkpoint = %d, want 0", cp)
+	}
+}
+
+// blockingClient implements Client with a FetchSince that blocks on a channel.
+// Close() closes the channel, unblocking FetchSince, simulating the real
+// go-imap behavior where Close() unblocks pending operations.
+type blockingClient struct {
+	mu          sync.Mutex
+	selectState MailboxState
+	blockCh     chan struct{} // FetchSince blocks until closed
+	closed      bool
+}
+
+func (c *blockingClient) Login(_, _ string) error { return nil }
+func (c *blockingClient) Select(_ string) (MailboxState, error) {
+	return c.selectState, nil
+}
+func (c *blockingClient) FetchSince(_ uint32, _ func(uint32, []byte) error) error {
+	<-c.blockCh
+	return errors.New("connection closed")
+}
+func (c *blockingClient) Idle(ctx context.Context) error {
+	<-ctx.Done()
+	return nil
+}
+func (c *blockingClient) HasIdle() bool { return false }
+func (c *blockingClient) Noop() error   { return nil }
+func (c *blockingClient) MoveUIDs(_ []uint32, _ string) error {
+	return nil
+}
+func (c *blockingClient) DeleteUIDs(_ []uint32) error { return nil }
+func (c *blockingClient) Close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.closed {
+		c.closed = true
+		close(c.blockCh)
+	}
+	return nil
+}
+
+func TestRunSession_ShutdownUnblocksViaClose(t *testing.T) {
+	repo := newTestRepo(t)
+	inject := func(_ context.Context, _ []byte) error { return nil }
+
+	bc := &blockingClient{
+		selectState: MailboxState{UIDValidity: 100},
+		blockCh:     make(chan struct{}),
+	}
+
+	w := &Worker{
+		cfg: config.IMAPConfig{
+			Folder:            "INBOX",
+			PollInterval:      config.Duration{Duration: time.Hour},
+			ReconnectDelay:    1,
+			MaxReconnectDelay: 1,
+		},
+		peerEmail:  "from@test.com",
+		localEmail: "to@test.com",
+		repo:       repo,
+		inject:     inject,
+		logger:     testLogger(),
+	}
+	w.dial = func(ctx context.Context, _ func()) (Client, error) {
+		return bc, nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- w.runSession(ctx)
+	}()
+
+	// Give runSession time to reach FetchSince.
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+
+	select {
+	case <-done:
+		// runSession returned promptly — force-close goroutine unblocked FetchSince.
+	case <-time.After(3 * time.Second):
+		t.Fatal("runSession did not return within 3s after context cancellation — force-close failed to unblock FetchSince")
+	}
+}

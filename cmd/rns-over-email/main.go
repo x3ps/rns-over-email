@@ -135,7 +135,9 @@ func run(args []string) error {
 	// Wait for first error or signal.
 	err = <-errCh
 	cancel()
-	// Drain remaining goroutine.
+	// Drain remaining goroutine. IMAP sessions are force-closed via
+	// client.Close() on context cancellation (see imap/worker.go runSession),
+	// which should unblock pending operations promptly.
 	select {
 	case <-errCh:
 	case <-time.After(10 * time.Second):

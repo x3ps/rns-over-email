@@ -116,6 +116,20 @@ func (w *Worker) runSession(ctx context.Context) error {
 	}
 	defer func() { _ = client.Close() }()
 
+	// Force-close the connection when ctx is cancelled to unblock any
+	// pending IMAP operations (Login, Select, Fetch, Noop). go-imap v2's
+	// Client.Close() is concurrency-safe: it closes the underlying net.Conn,
+	// unblocking all pending Read/Wait/Next calls (imapclient/client.go:138-141).
+	sessionDone := make(chan struct{})
+	defer close(sessionDone)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = client.Close()
+		case <-sessionDone:
+		}
+	}()
+
 	if err := client.Login(w.cfg.Username, w.cfg.Password); err != nil {
 		return fmt.Errorf("login: %w", err)
 	}
@@ -216,6 +230,22 @@ func (w *Worker) fetchAndProcess(ctx context.Context, client Client, lastUID uin
 		processedUIDs = append(processedUIDs, uid)
 		return nil
 	})
+
+	// If FetchSince returned a transport-level error (not a handler inject
+	// error), the fetch was incomplete. We cannot guarantee all UIDs in the
+	// range were delivered — unseen UIDs may exist below processed ones if
+	// the server returned responses out of order (RFC 3501 permits this).
+	//
+	// This is deliberately conservative: even when decodeFailedUID > 0
+	// alongside the transport error, we still suppress ALL checkpoint
+	// advancement. The decode-failed UID's ceiling would have limited
+	// advancement anyway, and with an incomplete fetch we can't trust
+	// that the ceiling itself is correct (there might be lower unseen UIDs).
+	//
+	// Re-injection on retry is safe: RNS deduplicates by packet hash.
+	if err != nil && failedUID == 0 {
+		return lastUID, err
+	}
 
 	// Compute safe checkpoint: advance only up to (but not past) any failure
 	// (inject or decode). This prevents gaps when the server returns UIDs out
