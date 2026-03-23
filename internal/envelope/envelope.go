@@ -22,11 +22,8 @@ import (
 // broken".
 var ErrNotTransport = errors.New("not an RNS transport message")
 
-// transportHeader is the header added to new-format outbound envelopes.
+// transportHeader is the header added to outbound envelopes.
 const transportHeader = "X-RNS-Transport"
-
-// legacySubject is the Subject value used by the legacy envelope format.
-const legacySubject = "RNS Transport Packet"
 
 // Params holds the metadata needed to construct an email envelope.
 type Params struct {
@@ -48,7 +45,6 @@ func Encode(p Params) ([]byte, string, error) {
 	h := textproto.MIMEHeader{}
 	h.Set("From", p.From)
 	h.Set("To", p.To)
-	h.Set("Subject", legacySubject)
 	h.Set("Date", time.Now().UTC().Format(time.RFC1123Z))
 	h.Set("Message-ID", mid)
 	h.Set("MIME-Version", "1.0")
@@ -58,7 +54,7 @@ func Encode(p Params) ([]byte, string, error) {
 
 	// Write headers using canonical format.
 	for _, key := range []string{
-		"From", "To", "Subject", "Date", "Message-ID",
+		"From", "To", "Date", "Message-ID",
 		"MIME-Version", "Content-Type", "Content-Transfer-Encoding",
 		transportHeader,
 	} {
@@ -115,18 +111,9 @@ type Decoded struct {
 }
 
 // isTransport determines whether a parsed message is an RNS transport envelope.
-// Returns true if the message matches either the new format (X-RNS-Transport
-// header) or the legacy format (Subject + Content-Type match).
+// Returns true if the message has X-RNS-Transport: 1 and application/octet-stream.
 func isTransport(header mail.Header, mediaType string) bool {
-	// New format: X-RNS-Transport: 1
-	if header.Get(transportHeader) == "1" && mediaType == "application/octet-stream" {
-		return true
-	}
-	// Legacy format: Subject + Content-Type
-	if header.Get("Subject") == legacySubject && mediaType == "application/octet-stream" {
-		return true
-	}
-	return false
+	return header.Get(transportHeader) == "1" && mediaType == "application/octet-stream"
 }
 
 // extractAddress parses an email address header and returns the bare address.
@@ -255,11 +242,9 @@ func decodeBody(body []byte, cte string) ([]byte, error) {
 	}
 }
 
-// hasTransportMarker scans raw email bytes for transport signals
+// hasTransportMarker scans raw email bytes for X-RNS-Transport: 1
 // without requiring a full RFC 5322 parse. Used as a fallback
 // when mail.ReadMessage() fails on a corrupted message.
-// Detects both new format (X-RNS-Transport: 1) and legacy format
-// (Subject: RNS Transport Packet).
 func hasTransportMarker(raw []byte) bool {
 	headerEnd := bytes.Index(raw, []byte("\r\n\r\n"))
 	if headerEnd < 0 {
@@ -280,9 +265,6 @@ func hasTransportMarker(raw []byte) bool {
 		name := bytes.TrimSpace(parts[0])
 		value := bytes.TrimSpace(parts[1])
 		if bytes.EqualFold(name, []byte("X-RNS-Transport")) && string(value) == "1" {
-			return true
-		}
-		if bytes.EqualFold(name, []byte("Subject")) && string(value) == legacySubject {
 			return true
 		}
 	}

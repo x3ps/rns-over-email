@@ -28,7 +28,7 @@ const (
 	// For messages with pathologically long headers (>16 KiB),
 	// mail.ReadMessage() on truncated input may fail, but
 	// hasTransportMarker() fallback scans the available bytes for
-	// X-RNS-Transport/Subject markers — correct classification.
+	// X-RNS-Transport marker — correct classification.
 	maxHeaderSize = 16 << 10
 
 	// maxFetchLiteralSize caps bytes buffered per message in FetchSince.
