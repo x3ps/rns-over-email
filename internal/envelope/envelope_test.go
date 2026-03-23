@@ -159,8 +159,8 @@ func TestErrNotTransportForCorrectSubjectWrongCT(t *testing.T) {
 	}
 }
 
-func TestAcceptsLegacyEnvelope(t *testing.T) {
-	// Legacy format: Subject + CT match, no X-RNS-Transport header.
+func TestRejectsLegacyEnvelope(t *testing.T) {
+	// Legacy format: Subject + CT match but no X-RNS-Transport header → rejected.
 	raw := strings.Join([]string{
 		"From: a@b.com",
 		"To: b@c.com",
@@ -171,12 +171,9 @@ func TestAcceptsLegacyEnvelope(t *testing.T) {
 		"raw binary data",
 	}, "\r\n")
 
-	decoded, err := Decode([]byte(raw))
-	if err != nil {
-		t.Fatalf("legacy envelope decode failed: %v", err)
-	}
-	if string(decoded.Packet) != "raw binary data" {
-		t.Errorf("packet = %q, want %q", decoded.Packet, "raw binary data")
+	_, err := Decode([]byte(raw))
+	if !errors.Is(err, ErrNotTransport) {
+		t.Errorf("expected ErrNotTransport for legacy-only envelope, got: %v", err)
 	}
 }
 
@@ -242,8 +239,8 @@ func TestDecodeMissingContentType(t *testing.T) {
 	}
 }
 
-func TestDecodeNoXRNSHeaders(t *testing.T) {
-	// Legacy format with base64 encoding.
+func TestRejectsLegacyBase64Envelope(t *testing.T) {
+	// Legacy format with base64 encoding but no X-RNS-Transport → rejected.
 	raw := strings.Join([]string{
 		"From: a@b.com",
 		"To: b@c.com",
@@ -255,12 +252,9 @@ func TestDecodeNoXRNSHeaders(t *testing.T) {
 		"aGVsbG8gd29ybGQ=",
 	}, "\r\n")
 
-	decoded, err := Decode([]byte(raw))
-	if err != nil {
-		t.Fatalf("decode without X-RNS headers failed: %v", err)
-	}
-	if string(decoded.Packet) != "hello world" {
-		t.Errorf("packet = %q, want %q", decoded.Packet, "hello world")
+	_, err := Decode([]byte(raw))
+	if !errors.Is(err, ErrNotTransport) {
+		t.Errorf("expected ErrNotTransport for legacy-only base64 envelope, got: %v", err)
 	}
 }
 
@@ -272,6 +266,7 @@ func TestCorruptBase64SinglePart(t *testing.T) {
 		"MIME-Version: 1.0",
 		"Content-Type: application/octet-stream",
 		"Content-Transfer-Encoding: base64",
+		"X-RNS-Transport: 1",
 		"",
 		"!!!not-valid-base64!!!",
 	}, "\r\n")
@@ -292,6 +287,7 @@ func TestDecodeEmptyBase64Body(t *testing.T) {
 		"MIME-Version: 1.0",
 		"Content-Type: application/octet-stream",
 		"Content-Transfer-Encoding: base64",
+		"X-RNS-Transport: 1",
 		"",
 		"",
 	}, "\r\n")
@@ -388,7 +384,7 @@ func TestEncodeRequiresParams(t *testing.T) {
 
 func TestDecodeBodyTooLarge(t *testing.T) {
 	// Build a message whose body exceeds MaxBodySize.
-	header := "From: a@b.com\r\nTo: b@c.com\r\nSubject: RNS Transport Packet\r\nMIME-Version: 1.0\r\nContent-Type: application/octet-stream\r\n\r\n"
+	header := "From: a@b.com\r\nTo: b@c.com\r\nSubject: RNS Transport Packet\r\nMIME-Version: 1.0\r\nContent-Type: application/octet-stream\r\nX-RNS-Transport: 1\r\n\r\n"
 	body := make([]byte, MaxBodySize+1)
 	for i := range body {
 		body[i] = 'A'
@@ -463,7 +459,7 @@ func TestMessageIDFormat(t *testing.T) {
 
 func TestBodySizeExactlyAtLimit(t *testing.T) {
 	// Body of exactly MaxBodySize bytes must be accepted (boundary: > not >=).
-	header := "From: a@b.com\r\nTo: b@c.com\r\nSubject: RNS Transport Packet\r\nMIME-Version: 1.0\r\nContent-Type: application/octet-stream\r\n\r\n"
+	header := "From: a@b.com\r\nTo: b@c.com\r\nSubject: RNS Transport Packet\r\nMIME-Version: 1.0\r\nContent-Type: application/octet-stream\r\nX-RNS-Transport: 1\r\n\r\n"
 	body := bytes.Repeat([]byte("A"), MaxBodySize)
 	raw := append([]byte(header), body...)
 
@@ -579,16 +575,14 @@ func TestUnparseableMessageWithMarkerIsOursBroken(t *testing.T) {
 	}
 }
 
-func TestLegacyMarkerDetectedInRawScan(t *testing.T) {
-	// Corrupted legacy message with Subject: RNS Transport Packet → ours-but-broken.
+func TestLegacySubjectNoLongerDetectedInRawScan(t *testing.T) {
+	// Legacy Subject without X-RNS-Transport is no longer a transport marker.
 	// Malformed header line causes mail.ReadMessage() to fail, triggering raw scan.
+	// Without X-RNS-Transport: 1, raw scan finds nothing → ErrNotTransport.
 	raw := []byte("Subject: RNS Transport Packet\r\nBadHeaderNoColon\r\n\r\ncorrupt")
 	_, err := Decode(raw)
-	if err == nil {
-		t.Fatal("expected error for corrupt legacy transport message")
-	}
-	if errors.Is(err, ErrNotTransport) {
-		t.Error("corrupt message with legacy subject should NOT be ErrNotTransport")
+	if !errors.Is(err, ErrNotTransport) {
+		t.Errorf("expected ErrNotTransport for legacy-only corrupt message, got: %v", err)
 	}
 }
 
@@ -599,7 +593,7 @@ func TestHasTransportMarker(t *testing.T) {
 		want bool
 	}{
 		{"new format", []byte("X-RNS-Transport: 1\r\nFrom: a@b.com\r\n\r\nbody"), true},
-		{"legacy format", []byte("Subject: RNS Transport Packet\r\n\r\nbody"), true},
+		{"legacy format", []byte("Subject: RNS Transport Packet\r\n\r\nbody"), false},
 		{"no marker", []byte("Subject: Hello\r\n\r\nbody"), false},
 		{"marker in body (not headers)", []byte("Subject: Hello\r\n\r\nX-RNS-Transport: 1"), false},
 		{"case insensitive header name", []byte("x-rns-transport: 1\r\n\r\nbody"), true},

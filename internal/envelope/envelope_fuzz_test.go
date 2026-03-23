@@ -24,7 +24,7 @@ func FuzzDecode(f *testing.F) {
 	f.Add([]byte{})
 
 	// Seed: oversized body
-	big := append([]byte("From: a@b.com\r\nTo: c@d.com\r\nSubject: RNS Transport Packet\r\nContent-Type: application/octet-stream\r\nContent-Transfer-Encoding: base64\r\nX-RNS-Transport: 1\r\n\r\n"), bytes.Repeat([]byte("AAAA"), 300000)...)
+	big := append([]byte("From: a@b.com\r\nTo: c@d.com\r\nContent-Type: application/octet-stream\r\nContent-Transfer-Encoding: base64\r\nX-RNS-Transport: 1\r\n\r\n"), bytes.Repeat([]byte("AAAA"), 300000)...)
 	f.Add(big)
 
 	f.Fuzz(func(t *testing.T, data []byte) {

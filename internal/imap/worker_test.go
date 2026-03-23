@@ -2004,7 +2004,7 @@ func TestMixedNonTransportCorruptValid(t *testing.T) {
 }
 
 func TestOctetStreamWithoutTransportMarkerSkipped(t *testing.T) {
-	// application/octet-stream without X-RNS-Transport or matching Subject → not transport.
+	// application/octet-stream without X-RNS-Transport → not transport.
 	repo := newTestRepo(t)
 
 	var injected int
@@ -2494,14 +2494,14 @@ func TestCleanupMoveWithUIDPlusOnly(t *testing.T) {
 	}
 }
 
-func TestCorruptedLegacyMessageBlocksCheckpoint(t *testing.T) {
+func TestFormerLegacyMessageIsSkipped(t *testing.T) {
 	repo := newTestRepo(t)
 
 	inject := func(_ context.Context, _ []byte) error { return nil }
 
-	// Truly unparseable (malformed header line) but with legacy Subject marker
-	// detectable by raw scan. mail.ReadMessage() fails → hasTransportMarker finds
-	// legacy subject → ours-but-broken.
+	// Unparseable message with legacy Subject but no X-RNS-Transport.
+	// hasTransportMarker raw scan no longer matches Subject-only →
+	// "not ours" → skipped, checkpoint advances past it.
 	corruptLegacy := []byte("Subject: RNS Transport Packet\r\nBadHeaderNoColon\r\n\r\ncorrupt")
 	mock := &mockClient{
 		selectState: MailboxState{UIDValidity: 100},
@@ -2521,8 +2521,8 @@ func TestCorruptedLegacyMessageBlocksCheckpoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if lastUID != 0 {
-		t.Errorf("lastUID = %d, want 0 (corrupt legacy message should block checkpoint)", lastUID)
+	if lastUID != 3 {
+		t.Errorf("lastUID = %d, want 3 (legacy-only message is now 'not ours', checkpoint advances)", lastUID)
 	}
 }
 

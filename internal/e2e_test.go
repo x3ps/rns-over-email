@@ -200,8 +200,8 @@ func TestE2EOutboundHappyPath(t *testing.T) {
 	if received[0].To != "peer@test.com" {
 		t.Errorf("to = %q, want peer@test.com", received[0].To)
 	}
-	if !bytes.Contains(received[0].Data, []byte("RNS Transport Packet")) {
-		t.Error("email missing RNS Transport Packet subject/body")
+	if !bytes.Contains(received[0].Data, []byte("X-RNS-Transport: 1")) {
+		t.Error("email missing X-RNS-Transport: 1 header")
 	}
 }
 
