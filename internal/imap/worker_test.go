@@ -2948,3 +2948,63 @@ func TestFetchAndProcessOversizedTransport(t *testing.T) {
 		t.Errorf("injected = %d, want 0", injected)
 	}
 }
+
+func TestCanonicalAddrNoAtSign(t *testing.T) {
+	// Address without @ should be returned as-is.
+	result := canonicalAddr("nope")
+	if result != "nope" {
+		t.Errorf("canonicalAddr(%q) = %q, want %q", "nope", result, "nope")
+	}
+}
+
+func TestTransportErrorSuppressesCheckpoint(t *testing.T) {
+	// FetchSince returns a transport error, failedUID==0 (no inject error),
+	// processedUIDs > 0. Must return lastUID (old value), not advance.
+	repo := newTestRepo(t)
+
+	var injected int
+	inject := func(_ context.Context, _ []byte) error {
+		injected++
+		return nil
+	}
+
+	raw := makeTestEnvelope(t, []byte("transport-err-pkt"))
+	mock := &mockClient{
+		selectState: MailboxState{UIDValidity: 100},
+		fetchMsgs:   []fetchMsg{{uid: 5, raw: raw}},
+		fetchErr:    errors.New("connection reset"),
+	}
+
+	w := &Worker{
+		cfg:        config.IMAPConfig{Folder: "INBOX"},
+		peerEmail:  "from@test.com",
+		localEmail: "to@test.com",
+		repo:       repo,
+		inject:     inject,
+		logger:     testLogger(),
+	}
+
+	lastUID, err := w.fetchAndProcess(context.Background(), mock, 0, "INBOX", 100)
+	if err == nil {
+		t.Fatal("expected transport error, got nil")
+	}
+	if !strings.Contains(err.Error(), "connection reset") {
+		t.Errorf("unexpected error: %v", err)
+	}
+	// Even though we processed uid=5, the transport error means the fetch
+	// was incomplete. Checkpoint must NOT advance.
+	if lastUID != 0 {
+		t.Errorf("lastUID = %d, want 0 (transport error should suppress checkpoint)", lastUID)
+	}
+	if injected != 1 {
+		t.Errorf("injected = %d, want 1", injected)
+	}
+
+	cp, cpErr := repo.GetCheckpoint(context.Background(), "INBOX", 100)
+	if cpErr != nil {
+		t.Fatal(cpErr)
+	}
+	if cp != 0 {
+		t.Errorf("checkpoint = %d, want 0", cp)
+	}
+}
