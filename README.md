@@ -45,12 +45,9 @@ Inbound messages are classified into three categories:
 2. **Ours but broken** (preserved): transport mail that matches transport signals but fails to decode (corrupt base64, unparseable From/To headers). Preserved for retry; blocks the checkpoint to prevent data loss.
 3. **Ours and valid** (processed): transport mail from the correct peer, to the correct local address, successfully decoded and injected into RNS.
 
-Transport envelope identification:
+Transport envelope identification: `X-RNS-Transport: 1` header present AND `Content-Type: application/octet-stream`.
 
-- **New format**: `X-RNS-Transport: 1` header present AND `Content-Type: application/octet-stream`.
-- **Legacy format**: `Subject: RNS Transport Packet` AND `Content-Type: application/octet-stream` (no `X-RNS-Transport` header).
-
-From/To address validation applies to all transport formats (new and legacy). The `From` header must match `--peer-email` and the `To` header must match `--smtp-from` (both normalized to bare addresses).
+From/To address validation applies to all transport messages. The `From` header must match `--peer-email` and the `To` header must match `--smtp-from` (both normalized to bare addresses).
 
 **Note**: Sender/recipient validation is protocol hardening (From/To header match), not cryptographic authentication — email headers can be spoofed by anyone with access to the mail server.
 
@@ -63,7 +60,6 @@ Outbound transport messages are sent as a single-part MIME email with a raw RNS 
 ```eml
 From: sender@example.com
 To: peer@example.com
-Subject: RNS Transport Packet
 Date: Tue, 23 Mar 2026 12:34:56 +0000
 Message-ID: <550e8400-e29b-41d4-a716-446655440000@example.com>
 MIME-Version: 1.0
@@ -78,13 +74,12 @@ Header semantics:
 
 - `From` — local transport email address (`--smtp-from`).
 - `To` — remote peer email address (`--peer-email`).
-- `Subject` — legacy compatibility marker. The decoder accepts legacy transport mail identified by `Subject: RNS Transport Packet` plus `Content-Type: application/octet-stream` even when `X-RNS-Transport` is missing.
 - `Date` — UTC timestamp of envelope creation.
 - `Message-ID` — unique identifier generated for the email; useful for diagnostics and mail server tracing.
 - `MIME-Version: 1.0` — declares MIME formatting.
 - `Content-Type: application/octet-stream` — marks the body as opaque binary transport payload rather than human-readable text.
 - `Content-Transfer-Encoding: base64` — encodes the raw RNS packet into RFC-compliant mail-safe text.
-- `X-RNS-Transport: 1` — primary transport marker for the current format.
+- `X-RNS-Transport: 1` — transport marker identifying this as an RNS transport envelope.
 
 Body semantics:
 
