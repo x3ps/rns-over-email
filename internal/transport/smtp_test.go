@@ -3,6 +3,7 @@ package transport
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -897,5 +898,302 @@ func TestSMTPSendDataRejectReturnsRegularError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "smtp data close") {
 		t.Errorf("expected 'smtp data close' in error, got: %v", err)
+	}
+}
+
+func TestSMTPSendBodyWriteFailure(t *testing.T) {
+	// Raw SMTP server: accepts DATA (354), then closes connection mid-body.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		write := func(s string) { _, _ = conn.Write([]byte(s + "\r\n")) }
+		buf := make([]byte, 4096)
+		readline := func() string {
+			var line []byte
+			for {
+				n, _ := conn.Read(buf[:1])
+				if n == 0 {
+					break
+				}
+				line = append(line, buf[0])
+				if len(line) >= 2 && line[len(line)-2] == '\r' && line[len(line)-1] == '\n' {
+					return strings.TrimRight(string(line), "\r\n")
+				}
+			}
+			return string(line)
+		}
+
+		write("220 localhost ESMTP test")
+		readline() // EHLO
+		write("250-localhost")
+		write("250 AUTH PLAIN")
+		readline() // AUTH PLAIN
+		write("235 ok")
+		readline() // MAIL FROM
+		write("250 ok")
+		readline() // RCPT TO
+		write("250 ok")
+		readline() // DATA
+		write("354 go ahead")
+		// Close immediately after 354 — client's Write to body should fail.
+	}()
+
+	host, port := splitHostPort(t, ln.Addr().String())
+	sender := &SMTPSender{
+		Host:     host,
+		Port:     port,
+		Username: "testuser",
+		Password: "testpass",
+		From:     "sender@test.com",
+		TLSMode:  "none",
+		Logger:   slog.New(slog.NewTextHandler(os.Stderr, nil)),
+	}
+
+	// Use a large body so the write is more likely to observe the closed connection.
+	body := bytes.Repeat([]byte("X"), 64*1024)
+	err = sender.Send(context.Background(), "receiver@test.com", body)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	// Must NOT be ErrDataOutcomeUnknown — the dot was never sent.
+	var unknown *ErrDataOutcomeUnknown
+	if errors.As(err, &unknown) {
+		t.Errorf("write failure should not be ErrDataOutcomeUnknown, got: %v", err)
+	}
+	// Error should be "smtp write:" or "smtp data:" (connection died during write or data open).
+	if !strings.Contains(err.Error(), "smtp write") && !strings.Contains(err.Error(), "smtp data") {
+		t.Errorf("expected 'smtp write' or 'smtp data' in error, got: %v", err)
+	}
+}
+
+func TestSMTPContextCancelledAfterConnect(t *testing.T) {
+	// Tests that Send returns promptly when context expires between connect
+	// and MAIL FROM. The server delays the MAIL FROM response so the
+	// hard deadline (propagated from the context) fires.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		write := func(s string) { _, _ = conn.Write([]byte(s + "\r\n")) }
+		buf := make([]byte, 4096)
+		readline := func() string {
+			var line []byte
+			for {
+				n, err := conn.Read(buf[:1])
+				if n == 0 || err != nil {
+					break
+				}
+				line = append(line, buf[0])
+				if len(line) >= 2 && line[len(line)-2] == '\r' && line[len(line)-1] == '\n' {
+					return strings.TrimRight(string(line), "\r\n")
+				}
+			}
+			return string(line)
+		}
+
+		write("220 localhost ESMTP test")
+		readline() // EHLO
+		write("250-localhost")
+		write("250 AUTH PLAIN")
+		readline() // AUTH PLAIN
+		write("235 ok")
+		readline() // MAIL FROM
+		// Delay: context deadline should fire before this response.
+		time.Sleep(5 * time.Second)
+		write("250 ok")
+	}()
+
+	host, port := splitHostPort(t, ln.Addr().String())
+	// Short deadline: auth should complete within ~200ms, then the remaining
+	// ~300ms fires while waiting for MAIL FROM response.
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	sender := &SMTPSender{
+		Host:     host,
+		Port:     port,
+		Username: "testuser",
+		Password: "testpass",
+		From:     "sender@test.com",
+		TLSMode:  "none",
+		Logger:   slog.New(slog.NewTextHandler(os.Stderr, nil)),
+	}
+
+	start := time.Now()
+	err = sender.Send(ctx, "receiver@test.com", []byte("Subject: test\r\n\r\nCancel test"))
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected error from context deadline")
+	}
+	if elapsed > 3*time.Second {
+		t.Errorf("Send took %v, expected prompt return near 500ms deadline", elapsed)
+	}
+}
+
+func TestSMTPAuthFallbackNoKnownMechanisms(t *testing.T) {
+	// Server advertises no known auth mechanisms. Code should fall back to
+	// PLAIN and log a warning.
+	backend := &authRecordingBackend{mechanisms: []string{}}
+	addr := startAuthTestServer(t, backend)
+	host, port := splitHostPort(t, addr)
+
+	sender := &SMTPSender{
+		Host: host, Port: port,
+		Username: "testuser", Password: "testpass",
+		From: "sender@test.com", TLSMode: "none",
+		Logger: slog.New(slog.NewTextHandler(os.Stderr, nil)),
+	}
+
+	// The server supports PLAIN in its Auth() handler even though
+	// AuthMechanisms() returns empty. The client falls through to default
+	// and sends PLAIN.
+	if err := sender.Send(context.Background(), "r@test.com", []byte("Subject: t\r\n\r\nhi")); err != nil {
+		t.Fatal(err)
+	}
+
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+	if backend.usedMech != "PLAIN" {
+		t.Errorf("used mechanism = %q, want PLAIN (fallback)", backend.usedMech)
+	}
+}
+
+func TestSMTPSendTLSMode(t *testing.T) {
+	cert := selfSignedCert(t, "localhost")
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{
+		Certificates: []tls.Certificate{cert},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+
+	backend := &testBackend{}
+	srv := smtp.NewServer(backend)
+	srv.Domain = "localhost"
+	srv.AllowInsecureAuth = true
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() { _ = srv.Close() })
+
+	host, port := splitHostPort(t, ln.Addr().String())
+	clientCfg := testTLSConfig(t, cert, "localhost")
+
+	sender := &SMTPSender{
+		Host:      host,
+		Port:      port,
+		Username:  "testuser",
+		Password:  "testpass",
+		From:      "sender@test.com",
+		TLSMode:   "tls",
+		TLSConfig: clientCfg,
+		Logger:    slog.New(slog.NewTextHandler(os.Stderr, nil)),
+	}
+
+	err = sender.Send(context.Background(), "receiver@test.com", []byte("Subject: test\r\n\r\nTLS test"))
+	if err != nil {
+		t.Fatalf("Send with TLS failed: %v", err)
+	}
+
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+	if len(backend.messages) != 1 {
+		t.Fatalf("got %d messages, want 1", len(backend.messages))
+	}
+}
+
+func TestSMTPSendTLSDialError(t *testing.T) {
+	// TLS dial to a plain TCP server → handshake failure → "smtp dial tls:" prefix.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+
+	go func() {
+		conn, _ := ln.Accept()
+		if conn != nil {
+			// Write non-TLS data to trigger handshake error.
+			_, _ = conn.Write([]byte("not tls"))
+			_ = conn.Close()
+		}
+	}()
+
+	host, port := splitHostPort(t, ln.Addr().String())
+	sender := &SMTPSender{
+		Host:     host,
+		Port:     port,
+		Username: "testuser",
+		Password: "testpass",
+		From:     "sender@test.com",
+		TLSMode:  "tls",
+		Logger:   slog.New(slog.NewTextHandler(os.Stderr, nil)),
+	}
+
+	err = sender.Send(context.Background(), "receiver@test.com", []byte("Subject: test\r\n\r\nTLS fail"))
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "smtp dial tls") {
+		t.Errorf("expected 'smtp dial tls' in error, got: %v", err)
+	}
+}
+
+func TestSMTPSendSTARTTLS(t *testing.T) {
+	cert := selfSignedCert(t, "localhost")
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+
+	backend := &testBackend{}
+	srv := smtp.NewServer(backend)
+	srv.Domain = "localhost"
+	srv.TLSConfig = &tls.Config{Certificates: []tls.Certificate{cert}}
+	srv.AllowInsecureAuth = false
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() { _ = srv.Close() })
+
+	host, port := splitHostPort(t, ln.Addr().String())
+	clientCfg := testTLSConfig(t, cert, "localhost")
+
+	sender := &SMTPSender{
+		Host:      host,
+		Port:      port,
+		Username:  "testuser",
+		Password:  "testpass",
+		From:      "sender@test.com",
+		TLSMode:   "starttls",
+		TLSConfig: clientCfg,
+		Logger:    slog.New(slog.NewTextHandler(os.Stderr, nil)),
+	}
+
+	err = sender.Send(context.Background(), "receiver@test.com", []byte("Subject: test\r\n\r\nSTARTTLS test"))
+	if err != nil {
+		t.Fatalf("Send with STARTTLS failed: %v", err)
+	}
+
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+	if len(backend.messages) != 1 {
+		t.Fatalf("got %d messages, want 1", len(backend.messages))
 	}
 }
