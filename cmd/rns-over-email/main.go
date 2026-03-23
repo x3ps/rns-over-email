@@ -95,27 +95,7 @@ func run(args []string) error {
 	// Inbound: IMAP worker.
 	inboxRepo := inbox.NewJSONRepo(cfg.Checkpoint.Path, logger)
 	inject := func(ctx context.Context, pkt []byte) error {
-		for {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			default:
-			}
-			err := iface.Receive(pkt)
-			if err == nil {
-				return nil
-			}
-			// Retry on ErrOffline (pipe not yet online) and ErrNotStarted
-			// (IMAP worker started before iface.Start() completed).
-			if !errors.Is(err, rnspipe.ErrOffline) && !errors.Is(err, rnspipe.ErrNotStarted) {
-				return err
-			}
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(time.Second):
-			}
-		}
+		return pipe.InjectWithRetry(ctx, pkt, iface.Receive)
 	}
 	imapW := imapworker.NewWorker(cfg.IMAP, cfg.Peer.Email, cfg.SMTP.From, inboxRepo, inject, logger)
 	imapW.SetOnline(agg.SetIMAP)
