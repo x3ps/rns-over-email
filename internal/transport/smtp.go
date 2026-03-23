@@ -28,13 +28,14 @@ const (
 
 // SMTPSender sends email messages via SMTP.
 type SMTPSender struct {
-	Host     string
-	Port     int
-	Username string
-	Password string
-	From     string
-	TLSMode  string // "tls", "starttls", "none"
-	Logger   *slog.Logger
+	Host      string
+	Port      int
+	Username  string
+	Password  string
+	From      string
+	TLSMode   string // "tls", "starttls", "none"
+	TLSConfig *tls.Config
+	Logger    *slog.Logger
 }
 
 // connect dials the SMTP server, creates a client with the configured TLS
@@ -45,7 +46,7 @@ func (s *SMTPSender) connect(ctx context.Context, label string) (*smtp.Client, *
 		return nil, nil, err
 	}
 
-	tc, dialErr := DialTCP(ctx, s.Host, s.Port, s.TLSMode, smtpDialTimeout, smtpIOTimeout)
+	tc, dialErr := DialTCP(ctx, s.Host, s.Port, s.TLSMode, smtpDialTimeout, smtpIOTimeout, s.TLSConfig)
 	if dialErr != nil {
 		if s.TLSMode == "tls" {
 			return nil, nil, fmt.Errorf("%s dial tls: %w", label, dialErr)
@@ -62,7 +63,11 @@ func (s *SMTPSender) connect(ctx context.Context, label string) (*smtp.Client, *
 	var c *smtp.Client
 	if s.TLSMode == "starttls" {
 		var err error
-		c, err = smtp.NewClientStartTLS(tc, &tls.Config{ServerName: s.Host})
+		starttlsCfg := s.TLSConfig
+		if starttlsCfg == nil {
+			starttlsCfg = &tls.Config{ServerName: s.Host}
+		}
+		c, err = smtp.NewClientStartTLS(tc, starttlsCfg)
 		if err != nil {
 			_ = tc.Close()
 			return nil, nil, fmt.Errorf("%s starttls: %w", label, err)

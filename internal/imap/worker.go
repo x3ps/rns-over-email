@@ -47,7 +47,7 @@ func NewWorker(cfg config.IMAPConfig, peerEmail, localEmail string, repo inbox.R
 		logger:     logger.With("component", "imap-worker"),
 	}
 	w.dial = func(ctx context.Context, onMailbox func()) (Client, error) {
-		return Dial(ctx, cfg.Host, cfg.Port, cfg.TLS, onMailbox)
+		return Dial(ctx, cfg.Host, cfg.Port, cfg.TLS, onMailbox, nil)
 	}
 	return w
 }

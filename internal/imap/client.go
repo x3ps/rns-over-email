@@ -76,7 +76,8 @@ type realClient struct {
 }
 
 // Dial creates a real IMAP client with the given TLS mode and host.
-func Dial(ctx context.Context, host string, port int, tlsMode string, onMailbox func()) (*realClient, error) {
+// If tlsCfg is nil, a default config with ServerName=host is used for TLS modes.
+func Dial(ctx context.Context, host string, port int, tlsMode string, onMailbox func(), tlsCfg *tls.Config) (*realClient, error) {
 	opts := &imapclient.Options{
 		UnilateralDataHandler: &imapclient.UnilateralDataHandler{
 			Mailbox: func(data *imapclient.UnilateralDataMailbox) {
@@ -87,7 +88,7 @@ func Dial(ctx context.Context, host string, port int, tlsMode string, onMailbox 
 		},
 	}
 
-	tc, dialErr := transport.DialTCP(ctx, host, port, tlsMode, imapDialTimeout, imapIOTimeout)
+	tc, dialErr := transport.DialTCP(ctx, host, port, tlsMode, imapDialTimeout, imapIOTimeout, tlsCfg)
 	if dialErr != nil {
 		if tlsMode == "tls" {
 			return nil, fmt.Errorf("imap dial tls: %w", dialErr)
@@ -98,7 +99,11 @@ func Dial(ctx context.Context, host string, port int, tlsMode string, onMailbox 
 	var c *imapclient.Client
 	if tlsMode == "starttls" {
 		var err error
-		opts.TLSConfig = &tls.Config{ServerName: host}
+		if tlsCfg != nil {
+			opts.TLSConfig = tlsCfg
+		} else {
+			opts.TLSConfig = &tls.Config{ServerName: host}
+		}
 		c, err = imapclient.NewStartTLS(tc, opts)
 		if err != nil {
 			_ = tc.Close()
